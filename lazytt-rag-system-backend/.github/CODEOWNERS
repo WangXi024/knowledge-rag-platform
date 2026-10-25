@@ -1,0 +1,5 @@
+# Default code owners for all repository files.
+* @lei-peng_lazyx @chaojun-xiao_lazyx
+
+# Protect the ownership policy itself.
+/.github/CODEOWNERS @lei-peng_lazyx @chaojun-xiao_lazyx

@@ -1,0 +1,10 @@
+{
+  "code": 0,
+  "data": {
+    "database": "ok",
+    "redis": "ok",
+    "document_engine": "ok",
+    "object_storage": "ok"
+  },
+  "message": "success"
+}

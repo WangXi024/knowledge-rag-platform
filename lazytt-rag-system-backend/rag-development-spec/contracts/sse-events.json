@@ -1,0 +1,138 @@
+{
+  "protocol_version": "1.0",
+  "events": [
+    {
+      "event": "accepted",
+      "id": "1",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 1,
+        "timestamp": "2026-07-26T08:00:00.000Z"
+      }
+    },
+    {
+      "event": "retrieval.started",
+      "id": "2",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 2,
+        "timestamp": "2026-07-26T08:00:00.010Z",
+        "retrieval_profile": "hybrid-structure-aware@6"
+      }
+    },
+    {
+      "event": "retrieval.completed",
+      "id": "3",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 3,
+        "timestamp": "2026-07-26T08:00:00.430Z",
+        "candidate_count": 8,
+        "context_count": 5,
+        "duration_ms": 420,
+        "query_plan": {
+          "detected_language": "zh-CN",
+          "variants": {"zh-CN": "RAGFlow 支持哪些解析器？"},
+          "knowledge_languages": ["zh-CN"],
+          "retrieval_routes": [
+            "vector:original:zh-CN",
+            "term:zh-CN",
+            "parent:children"
+          ],
+          "query_type": "list",
+          "retrieval_top_k": 50,
+          "rerank_top_n": 10,
+          "context_top_n": 6
+        }
+      }
+    },
+    {
+      "event": "generation.started",
+      "id": "4",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 4,
+        "timestamp": "2026-07-26T08:00:00.440Z",
+        "model_profile": "answer-openai-compatible@4"
+      }
+    },
+    {
+      "event": "answer.delta",
+      "id": "5",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 5,
+        "timestamp": "2026-07-26T08:00:00.900Z",
+        "delta": "RAGFlow 可以保留 DeepDoc，"
+      }
+    },
+    {
+      "event": "answer.delta",
+      "id": "6",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 6,
+        "timestamp": "2026-07-26T08:00:01.020Z",
+        "delta": "并按知识库选择 MinerU。[C1]"
+      }
+    },
+    {
+      "event": "citation",
+      "id": "7",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 7,
+        "timestamp": "2026-07-26T08:00:01.100Z",
+        "citation": {
+          "citation_id": "1b426ba4-da75-4db4-9265-d9bf5d30d03f",
+          "label": "C1",
+          "knowledge_base_id": "4b5d82ac-b50a-4757-b71d-f6f17e1a30fa",
+          "document_id": "8fc0f1a4-5dd5-4c94-a9d2-1dd8def3f265",
+          "document_name": "parser-guide.pdf",
+          "page_start": 6,
+          "page_end": 6,
+          "positions": [{"page": 6, "bbox": [10, 20, 500, 80]}],
+          "quote": "MinerU 是可选 PDF 解析器。",
+          "score": 0.86
+        }
+      }
+    },
+    {
+      "event": "usage",
+      "id": "8",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 8,
+        "timestamp": "2026-07-26T08:00:01.120Z",
+        "prompt_tokens": 1800,
+        "completion_tokens": 35,
+        "total_tokens": 1835
+      }
+    },
+    {
+      "event": "completed",
+      "id": "9",
+      "data": {
+        "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+        "sequence": 9,
+        "timestamp": "2026-07-26T08:00:01.130Z",
+        "outcome": "success",
+        "warnings": []
+      }
+    }
+  ],
+  "error_example": {
+    "event": "error",
+    "id": "5",
+    "data": {
+      "request_id": "19d1f2e7-99cd-43b9-a25f-0ee8eec5706d",
+      "sequence": 5,
+      "timestamp": "2026-07-26T08:00:15.000Z",
+      "error": {
+        "code": "RAG-LLM-002",
+        "message": "生成超时",
+        "retryable": true
+      }
+    }
+  }
+}

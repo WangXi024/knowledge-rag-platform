@@ -1,0 +1,317 @@
+# 独立运行时栈：只启动 RAGFlow 与自研 Gateway/Worker/Scheduler。
+# PostgreSQL、统一 Redis Stack、Elasticsearch、MinIO 由 storage Compose
+# 或外部服务器提供；切换目标只需要修改环境变量，不需要改 Python 代码。
+# 运行时使用独立 Compose Project，Docker Desktop 会把它与有状态存储明确分组。
+# 历史命名卷仍显式复用，因此这里只改变容器归属和显示，不迁移或删除持久化数据。
+name: lazytt-rag-runtime
+
+x-rag-app-common: &rag-app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${RAG_APP_IMAGE}
+  environment:
+    RAG_CONFIG_PATH: /app/configs/application.yaml
+    # 本机测试：自动上传 PDF 默认走官网 VLM；显式选择策略仍优先。
+    RAG_PDF_DEFAULT_PARSER: mineru-cloud@1
+    # 自动 Schema 准备命令必须在容器内看到显式模式；它只接受 local，external 即使
+    # 误调用也会在连接数据库前拒绝执行 DDL。普通只读检查也用该值选择权限契约。
+    RAG_STORAGE_MODE: ${RAG_STORAGE_MODE}
+    APP_DATABASE_DSN: ${APP_DATABASE_DSN}
+    # Schema 检查容器需要同时验证 DBA 已安装的 RAGFlow PostgreSQL 结构。
+    # 这些变量仅用于连接与只读系统目录查询，不允许执行建表或迁移。
+    RAGFLOW_POSTGRES_HOST: ${RAGFLOW_POSTGRES_HOST:-postgres}
+    RAGFLOW_POSTGRES_PORT: ${RAGFLOW_POSTGRES_PORT:-5432}
+    RAGFLOW_POSTGRES_DATABASE: ${RAGFLOW_POSTGRES_DATABASE}
+    RAGFLOW_POSTGRES_USER: ${RAGFLOW_POSTGRES_USER}
+    RAGFLOW_POSTGRES_PASSWORD: ${RAGFLOW_POSTGRES_PASSWORD}
+    APP_REDIS_URL: ${APP_REDIS_URL}
+    CACHE_REDIS_URL: ${CACHE_REDIS_URL}
+    RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-http://ragflow-server:9380}
+    RAGFLOW_API_KEY: ${RAGFLOW_API_KEY}
+    RAGFLOW_EMBEDDING_MODEL: ${RAGFLOW_EMBEDDING_MODEL}
+    RAGFLOW_VISION_MODEL: ${RAGFLOW_VISION_MODEL}
+    RAGFLOW_VISION_RUNTIME_MODEL: ${RAGFLOW_VISION_RUNTIME_MODEL}
+    LLM_BASE_URL: ${LLM_BASE_URL}
+    # 每项模型能力只读取自己的通用三元组。用户可以为多项能力填写同一个兼容端点
+    # 和 Key，也可以分别使用不同供应商；真实值只保存在 Git 忽略环境中。
+    LLM_API_KEY: ${LLM_API_KEY}
+    LLM_MODEL: ${LLM_MODEL}
+    REWRITE_MODEL: ${REWRITE_MODEL}
+    LLM_OMIT_SAMPLING_PARAMETERS: ${LLM_OMIT_SAMPLING_PARAMETERS:-false}
+    LLM_MAX_OUTPUT_TOKENS_FIELD: ${LLM_MAX_OUTPUT_TOKENS_FIELD:-max_tokens}
+    LLM_EXTRA_BODY_JSON: ${LLM_EXTRA_BODY_JSON}
+    EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
+    EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION}
+    VISION_BASE_URL: ${VISION_BASE_URL}
+    VISION_API_KEY: ${VISION_API_KEY}
+    VISION_MODEL: ${VISION_MODEL}
+    MEDIA_VISION_BASE_URL: ${MEDIA_VISION_BASE_URL:-}
+    MEDIA_VISION_API_KEY: ${MEDIA_VISION_API_KEY:-}
+    MEDIA_VISION_MODEL: ${MEDIA_VISION_MODEL:-}
+    MEDIA_PROCESSING_ENABLED: ${MEDIA_PROCESSING_ENABLED:-false}
+    ASR_BASE_URL: ${ASR_BASE_URL:-}
+    ASR_API_KEY: ${ASR_API_KEY:-}
+    ASR_MODEL: ${ASR_MODEL:-}
+    RERANK_ENABLED: ${RERANK_ENABLED:-false}
+    RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+    RERANK_API_KEY: ${RERANK_API_KEY:-}
+    RERANK_MODEL: ${RERANK_MODEL:-}
+    UPLOAD_STAGING_DIR: /var/lib/rag/uploads
+    PROFILE_SEED_DIR: /app/configs
+    BUILD_COMMIT: ${BUILD_COMMIT:-local}
+    BUILD_TIME: ${BUILD_TIME:-}
+    TZ: ${TZ:-Asia/Shanghai}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - ragflow-backplane
+  restart: unless-stopped
+
+x-ragflow-common: &ragflow-common
+  image: ${RAGFLOW_IMAGE}
+  platform: ${RAGFLOW_PLATFORM:-linux/amd64}
+  environment: &ragflow-environment
+    DB_TYPE: postgres
+    DOC_ENGINE: elasticsearch
+    STORAGE_IMPL: MINIO
+    API_PROXY_SCHEME: python
+    # 本地开发 UI/API 只绑定宿主机 127.0.0.1，因此保持注册开启，支持启动脚本通过
+    # 官方账号 API 自动完成首次初始化。生产部署必须建立独立身份与注册策略。
+    REGISTER_ENABLED: ${RAGFLOW_REGISTER_ENABLED:-1}
+    DISABLE_PASSWORD_LOGIN: "0"
+    ALLOW_ANY_HOST: "0"
+    POSTGRES_HOST: ${RAGFLOW_POSTGRES_HOST:-postgres}
+    POSTGRES_PORT: ${RAGFLOW_POSTGRES_PORT:-5432}
+    POSTGRES_DBNAME: ${RAGFLOW_POSTGRES_DATABASE}
+    POSTGRES_USER: ${RAGFLOW_POSTGRES_USER}
+    POSTGRES_PASSWORD: ${RAGFLOW_POSTGRES_PASSWORD}
+    ES_SCHEME: ${RAGFLOW_ES_SCHEME:-http}
+    ES_HOST: ${RAGFLOW_ES_HOST:-elasticsearch}
+    ES_PORT: ${RAGFLOW_ES_PORT:-9200}
+    ES_USER: elastic
+    ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+    MINIO_HOST: ${RAGFLOW_MINIO_HOST:-minio}
+    MINIO_PORT: ${RAGFLOW_MINIO_PORT:-9000}
+    MINIO_USER: ${MINIO_USER}
+    MINIO_PASSWORD: ${MINIO_PASSWORD}
+    # RAGFlow 与自研服务共用一个 Redis Stack 物理实例，RAGFlow 在
+    # service_conf 中固定使用 DB 1，不会与缓存 DB 0 或 Celery DB 2 混写。
+    REDIS_HOST: ${REDIS_STACK_HOST:-redis-stack}
+    REDIS_PORT: ${REDIS_STACK_PORT:-6379}
+    REDIS_PASSWORD: ${REDIS_STACK_PASSWORD}
+    MACOS: "1"
+    TZ: ${TZ:-Asia/Shanghai}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    # 本地模板独立维护；ECS 发布使用 deploy/ecs/ragflow 下的另一份模板。
+    - ./deploy/local/ragflow/service_conf.postgres.yaml.template:/ragflow/conf/service_conf.yaml.template:ro
+    - ragflow_logs:/ragflow/logs
+  networks:
+    - ragflow-backplane
+  restart: unless-stopped
+
+services:
+  mineru-cloud-adapter:
+    # 可选云端适配服务：按名称启动，不随默认运行栈自动启用。
+    profiles: [mineru]
+    image: ${RAG_APP_IMAGE}
+    command: [uvicorn, rag_service.infrastructure.mineru_cloud.server:app, --host, "0.0.0.0", --port, "8000", --no-access-log]
+    # 从统一本地环境中仅提取 MinerU 两项配置，不向其他服务注入官网 Token。
+    environment:
+      MINERU_CLOUD_API_TOKEN: ${MINERU_CLOUD_API_TOKEN:-}
+      MINERU_CLOUD_MODEL: ${MINERU_CLOUD_MODEL:-vlm}
+      # 本机 10 文件并发压测；官网额度仍由账号限制。
+      MINERU_CLOUD_MAX_CONCURRENCY: ${MINERU_CLOUD_MAX_CONCURRENCY:-10}
+      MINERU_CLOUD_RESULT_CONCURRENCY: ${MINERU_CLOUD_RESULT_CONCURRENCY:-2}
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+    # 本机以 1 核、2 GiB 测试云端适配；请求与结果转换并发由上方环境变量控制。
+    cpus: '1.0'
+    mem_limit: 2g
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  ragflow-smoke-embedding:
+    profiles: ["smoke"]
+    image: ${RAGFLOW_SMOKE_EMBEDDING_IMAGE:-python:3.12-alpine}
+    command: ["python", "/fixture/openai_embedding_server.py"]
+    volumes:
+      - ./tests/fixtures/openai_embedding_server.py:/fixture/openai_embedding_server.py:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - ragflow-backplane
+    restart: unless-stopped
+
+  ragflow-server:
+    <<: *ragflow-common
+    depends_on:
+      rag-app-schema-check:
+        condition: service_completed_successfully
+    # RAGFlow 官方 entrypoint 默认不启动 Admin Server。当前 Gateway 只依赖 9380
+    # 主 API，因此这里不传 --enable-adminserver，避免额外常驻约 1 GiB 的
+    # admin/server/admin_server.py 进程；管理 UI 8081 和主 API 9380 保持可用。
+    command:
+      [
+        "--disable-taskexecutor",
+        "--disable-datasync",
+      ]
+    ports:
+      - "127.0.0.1:${RAGFLOW_WEB_PORT:-8081}:80"
+      - "127.0.0.1:${RAGFLOW_API_PORT:-9380}:9380"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9380/api/v1/system/healthz >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 90s
+
+  ragflow-task-executor:
+    <<: *ragflow-common
+    # 本地解析测试的资源上限；并发数由 RAGFlow 的任务配置单独控制。
+    cpus: '4.0'
+    mem_limit: 8g
+    # 保留共享连接配置；本地压测最多同时处理 10 个解析任务及切块构建任务。
+    environment:
+      <<: *ragflow-environment
+      MAX_CONCURRENT_TASKS: ${RAGFLOW_MAX_CONCURRENT_TASKS:-10}
+      MAX_CONCURRENT_CHUNK_BUILDERS: ${RAGFLOW_MAX_CONCURRENT_CHUNK_BUILDERS:-10}
+    command:
+      [
+        "--disable-webserver",
+        "--disable-datasync",
+        "--workers=1",
+        "--host-id=ragflow-task-executor",
+      ]
+    depends_on:
+      ragflow-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pgrep -f 'rag/svr/task_executor.py' >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  rag-app-schema-check:
+    <<: *rag-app-common
+    # 默认命令始终只读检查表集合、正式版本和权限。start-full.sh 只在 local 模式用
+    # 一次性 run 覆盖为 prepare-local；external 模式仍只能由 DBA 执行评审 DDL。
+    command: ["python", "-m", "rag_service.cli", "schema", "check"]
+    restart: "no"
+
+  rag-app-bootstrap:
+    <<: *rag-app-common
+    command: ["python", "-m", "rag_service.cli", "bootstrap", "all"]
+    restart: "no"
+    depends_on:
+      rag-app-schema-check:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+
+  rag-gateway:
+    <<: *rag-app-common
+    command:
+      [
+        "uvicorn",
+        "rag_service.api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+      ]
+    ports:
+      - "${RAG_APP_BIND_ADDRESS:-127.0.0.1}:${RAG_APP_PORT:-8080}:8080"
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=8).read()",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  rag-worker:
+    <<: *rag-app-common
+    command:
+      [
+        "celery",
+        "-A",
+        "rag_service.workers.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        # 并发统一读取本地环境配置，修改后重建 Worker。
+        "--concurrency=${WORKER_CONCURRENCY:-10}",
+      ]
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+
+  rag-scheduler:
+    <<: *rag-app-common
+    command:
+      [
+        "celery",
+        "-A",
+        "rag_service.workers.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+      ]
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+
+networks:
+  ragflow-backplane:
+    # 两个独立 Compose Project 不能共同“拥有”一个网络，因此网络由启动脚本在
+    # 项目之外幂等创建。runtime 和 storage 都把它视为外部共享网络。
+    external: true
+    name: ${RAG_DOCKER_NETWORK:-lazytt-ragflow-poc_ragflow-backplane}
+
+volumes:
+  upload_staging_data:
+    name: lazytt-ragflow-poc_upload_staging_data
+  ragflow_logs:
+    name: lazytt-ragflow-poc_ragflow_logs

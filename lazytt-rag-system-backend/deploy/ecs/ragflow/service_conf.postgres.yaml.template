@@ -1,0 +1,45 @@
+ragflow:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9380
+
+admin:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9381
+
+postgres:
+  name: '${POSTGRES_DBNAME:-rag_flow}'
+  user: '${POSTGRES_USER:-rag_flow}'
+  password: '${POSTGRES_PASSWORD}'
+  host: '${POSTGRES_HOST:-postgres}'
+  port: ${POSTGRES_PORT:-5432}
+  max_connections: ${RAGFLOW_PG_POOL_SIZE:-100}
+  stale_timeout: 30
+
+minio:
+  user: '${MINIO_USER:-ragflow}'
+  password: '${MINIO_PASSWORD}'
+  host: '${MINIO_HOST:-minio}:${MINIO_PORT:-9000}'
+  bucket: '${MINIO_BUCKET:-}'
+  prefix_path: '${MINIO_PREFIX_PATH:-}'
+
+es:
+  hosts: '${ES_SCHEME:-http}://${ES_HOST:-elasticsearch}:${ES_PORT:-9200}'
+  username: '${ES_USER:-elastic}'
+  password: '${ELASTIC_PASSWORD}'
+
+redis:
+  db: 1
+  username: '${REDIS_USERNAME:-}'
+  password: '${REDIS_PASSWORD}'
+  # 统一 Redis Stack 中 DB 1 只供 RAGFlow 内部队列与状态使用。
+  host: '${REDIS_HOST:-redis-stack}:${REDIS_PORT:-6379}'
+
+file_syncer:
+  max_concurrent_syncs: 4
+  sync_interval: 3
+
+user_default_llm:
+  default_models:
+    embedding_model:
+      api_key: ''
+      base_url: ''

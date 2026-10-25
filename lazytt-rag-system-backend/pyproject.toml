@@ -1,0 +1,94 @@
+# Python 包、依赖与质量门禁总配置：构建、Ruff、Mypy、pytest 和 Coverage 均从这里读取。
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lazytt-rag-service"
+version = "0.1.0"
+description = "Scope-isolated RAG Gateway, Worker, and Scheduler"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "celery[redis]>=5.4,<6",
+  "fastapi>=0.115,<1",
+  "greenlet>=3.1,<4",
+  "httpx>=0.28,<1",
+  "img2pdf>=0.6,<0.7",
+  "pikepdf>=9,<11",
+  "psycopg[binary,pool]>=3.2,<4",
+  "pydantic>=2.10,<3",
+  "python-multipart>=0.0.20,<1",
+  "PyYAML>=6.0,<7",
+  "redis>=5.2,<6",
+  "SQLAlchemy>=2.0.36,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<8",
+  "respx>=0.22,<1",
+  "ruff>=0.9,<1",
+  "types-PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+rag-service = "rag_service.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_service"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "postgres: requires a PostgreSQL test database",
+  "redis: requires a Redis Stack test instance",
+  "docker: requires Docker",
+  "external: requires external model or RAGFlow services",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["rag_service.application", "rag_service.domain"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 80
+omit = [
+  "src/rag_service/domain/ports.py",
+  "migrations/*",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+# 该工具内嵌完整 HTML/CSS/JavaScript 模板；强行按 Python 行宽拆分会破坏前端模板的
+# 可读性，并且不会提升生成结果质量，因此只对这个生成器关闭 E501。
+"tools/build_api_reference.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["rag_service"]
+warn_unused_ignores = true
+exclude = ["migrations"]
+
+[[tool.mypy.overrides]]
+module = ["celery.*", "kombu", "kombu.*", "redis.*"]
+ignore_missing_imports = true

@@ -1,0 +1,393 @@
+# 版本化分块/检索 Profile：定义阈值、RRF 路线权重、上下文预算和回退策略。
+schema_version: 1
+
+chunk_profiles:
+  - ref: general-512@1
+    chunk_token_num: 512
+    delimiter: "\n!?;。；！？"
+    overlap_ratio: 0.10
+    note: overlap_ratio is a project-level target; verify exact RAGFlow configuration during PoC
+
+  # 新建知识库的默认分块版本。Gateway 会把 0.10 转换成 RAGFlow Dataset API
+  # 识别的 overlapped_percent=10，因此相邻文本块会保留约 10% 的上下文。
+  - ref: general-256@2
+    chunk_token_num: 256
+    delimiter: "\n!?;。；！？"
+    overlap_ratio: 0.10
+    note: default 256-token chunk profile with 10 percent overlap
+
+  # 长篇 PDF、Word 和普通文本优先保留完整段落；12% 重叠降低跨段事实被切断的概率。
+  - ref: prose-384@1
+    chunk_token_num: 384
+    delimiter: "\n!?;。；！？"
+    overlap_ratio: 0.12
+    note: paragraph-oriented profile for prose and long-form documents
+
+  # Excel/CSV 以换行为主要边界，较小块控制单次表格行组；表头由 Gateway 侧车重复。
+  - ref: table-192@1
+    chunk_token_num: 192
+    delimiter: "\n"
+    overlap_ratio: 0.05
+    note: row-oriented profile for spreadsheets and delimited tables
+
+  # PPT 和图片 OCR 文本通常较短且主题切换快，小块能减少不同页面或视觉区域混合。
+  - ref: visual-192@1
+    chunk_token_num: 192
+    delimiter: "\n!?;。；！？"
+    overlap_ratio: 0.08
+    note: short visual profile for presentations and image OCR
+
+  # 音视频已先转换为时间戳 Markdown，较长块与 12% 重叠可以保留完整发言上下文。
+  - ref: media-320@1
+    chunk_token_num: 320
+    delimiter: "\n!?;。；！？"
+    overlap_ratio: 0.12
+    note: timestamp-aware transcript profile for audio and video
+
+retrieval_profiles:
+  # @1 已经写入现有部署的 PostgreSQL，属于不可变历史契约。即使当前运行环境通过
+  # 通用环境变量更换实际模型，也不能原地替换这里的引用；新契约由后续版本承载。
+  - ref: hybrid-default@1
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 50
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 3
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 6000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50
+
+  - ref: hybrid-default@2
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 50
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    rrf:
+      k: 60
+      original_vector_weight: 1.0
+      translated_vector_weight: 0.9
+      primary_term_weight: 1.0
+      secondary_term_weight: 0.8
+      unknown_term_weight: 0.9
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 3
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 6000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50
+
+  # 新请求默认使用的自适应检索版本。@1/@2 继续保留固定 Top-K 行为，便于历史请求、
+  # 缓存边界和线上故障快速回滚；只有显式选择 @3 才会按问题类型扩大或收紧召回。
+  - ref: hybrid-adaptive@3
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 30
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    rrf:
+      k: 60
+      original_vector_weight: 1.0
+      translated_vector_weight: 0.9
+      primary_term_weight: 1.0
+      secondary_term_weight: 0.8
+      unknown_term_weight: 0.9
+    adaptive_top_k:
+      enabled: true
+      strategies:
+        fact: {top_k: 30, rerank_top_n: 8, context_top_n: 5}
+        list: {top_k: 50, rerank_top_n: 10, context_top_n: 6}
+        comparison: {top_k: 60, rerank_top_n: 12, context_top_n: 7}
+        summary: {top_k: 80, rerank_top_n: 15, context_top_n: 8}
+        multi_hop: {top_k: 80, rerank_top_n: 16, context_top_n: 8}
+    # Parent 只保存连续原始 Chunk 的归属关系；命中后最多补回三个 Parent、每组四块。
+    # Summary 只用于概览问题导航，最终候选和引用仍从 source_chunk_ids 回读 RAGFlow。
+    parent_child:
+      enabled: true
+      max_parents: 3
+      max_siblings_per_parent: 4
+      rrf_weight: 0.70
+    summary_index:
+      enabled: true
+      candidate_nodes: 500
+      top_nodes: 4
+      source_chunks_per_node: 4
+      rrf_weight: 0.85
+    # 实体/关系只由确定性规则抽取并用于导航到真实源 Chunk；没有命中时基础检索不变。
+    entity_graph:
+      enabled: true
+      max_evidence: 12
+      source_chunks_per_evidence: 2
+      rrf_weight: 0.75
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 4
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 7000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50
+
+  # 新请求默认使用的多粒度版本。@3 的配置保持不变，便于历史请求和缓存回滚；@4
+  # 在原自适应双语检索上增加文档摘要与章节摘要路线，最终证据仍回读 RAGFlow Chunk。
+  - ref: hybrid-multigranular@4
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 30
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    rrf:
+      k: 60
+      original_vector_weight: 1.0
+      translated_vector_weight: 0.9
+      primary_term_weight: 1.0
+      secondary_term_weight: 0.8
+      unknown_term_weight: 0.9
+    adaptive_top_k:
+      enabled: true
+      strategies:
+        fact: {top_k: 30, rerank_top_n: 8, context_top_n: 5}
+        list: {top_k: 50, rerank_top_n: 10, context_top_n: 6}
+        comparison: {top_k: 60, rerank_top_n: 12, context_top_n: 7}
+        summary: {top_k: 80, rerank_top_n: 15, context_top_n: 8}
+        multi_hop: {top_k: 80, rerank_top_n: 16, context_top_n: 8}
+    parent_child:
+      enabled: true
+      max_parents: 3
+      max_siblings_per_parent: 4
+      rrf_weight: 0.70
+    summary_index:
+      enabled: true
+      include_sections: true
+      candidate_nodes: 1000
+      top_nodes: 8
+      source_chunks_per_node: 4
+      rrf_weight: 0.85
+      section_rrf_weight: 0.80
+    # 保留 @3 已有的轻量实体导航能力，但本版本不扩展知识图谱或实体关系推理。
+    entity_graph:
+      enabled: true
+      max_evidence: 12
+      source_chunks_per_evidence: 2
+      rrf_weight: 0.75
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 4
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 7000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50
+
+  # 结构感知版本在 @4 的基础上允许带文档/章节/表头前缀的 Parent 参与向量导航。
+  # Parent 正文只保存在 Gateway PostgreSQL，命中后仍回读 RAGFlow 原始 Chunk，
+  # 所以不会把检索前缀或表头副本冒充引用证据；旧 @4 保持不变用于快速回滚。
+  - ref: hybrid-structure-aware@5
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 30
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    rrf:
+      k: 60
+      original_vector_weight: 1.0
+      translated_vector_weight: 0.9
+      primary_term_weight: 1.0
+      secondary_term_weight: 0.8
+      unknown_term_weight: 0.9
+    adaptive_top_k:
+      enabled: true
+      strategies:
+        fact: {top_k: 30, rerank_top_n: 8, context_top_n: 5}
+        list: {top_k: 50, rerank_top_n: 10, context_top_n: 6}
+        comparison: {top_k: 60, rerank_top_n: 12, context_top_n: 7}
+        summary: {top_k: 80, rerank_top_n: 15, context_top_n: 8}
+        multi_hop: {top_k: 80, rerank_top_n: 16, context_top_n: 8}
+    parent_child:
+      enabled: true
+      max_parents: 3
+      max_siblings_per_parent: 4
+      rrf_weight: 0.70
+    summary_index:
+      enabled: true
+      include_sections: true
+      include_contextual_parents: true
+      candidate_nodes: 1500
+      top_nodes: 10
+      source_chunks_per_node: 4
+      rrf_weight: 0.85
+      section_rrf_weight: 0.80
+      contextual_parent_rrf_weight: 0.72
+      table_parent_rrf_weight: 0.78
+    entity_graph:
+      enabled: true
+      max_evidence: 12
+      source_chunks_per_evidence: 2
+      rrf_weight: 0.75
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 4
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 7000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50
+
+  # v6 保留 v5 的双语基础召回、结构感知导航、实体路线和动态预算，只在本地
+  # Summary/Section/Context Parent 向量导航取 Top-N 前增加 0.40 余弦相似度门槛。
+  # 这条门槛不作用于 RAGFlow 基础召回、实体精确匹配、Parent-Child 上下文扩展或
+  # Cross-Encoder Rerank；知识库没有相关侧车节点时允许该路线返回空结果。
+  - ref: hybrid-structure-aware@6
+    enabled: true
+    ragflow:
+      page: 1
+      page_size: 20
+      top_k: 30
+      similarity_threshold: 0.20
+      vector_similarity_weight: 0.50
+      keyword: false
+      highlight: false
+      use_kg: false
+      toc_enhance: false
+      rerank_profile: bge-reranker-v2-m3@1
+    rrf:
+      k: 60
+      original_vector_weight: 1.0
+      translated_vector_weight: 0.9
+      primary_term_weight: 1.0
+      secondary_term_weight: 0.8
+      unknown_term_weight: 0.9
+    adaptive_top_k:
+      enabled: true
+      strategies:
+        fact: {top_k: 30, rerank_top_n: 8, context_top_n: 5}
+        list: {top_k: 50, rerank_top_n: 10, context_top_n: 6}
+        comparison: {top_k: 60, rerank_top_n: 12, context_top_n: 7}
+        summary: {top_k: 80, rerank_top_n: 15, context_top_n: 8}
+        multi_hop: {top_k: 80, rerank_top_n: 16, context_top_n: 8}
+    parent_child:
+      enabled: true
+      max_parents: 3
+      max_siblings_per_parent: 4
+      rrf_weight: 0.70
+    summary_index:
+      enabled: true
+      include_sections: true
+      include_contextual_parents: true
+      candidate_nodes: 1500
+      similarity_threshold: 0.40
+      top_nodes: 10
+      source_chunks_per_node: 4
+      rrf_weight: 0.85
+      section_rrf_weight: 0.80
+      contextual_parent_rrf_weight: 0.72
+      table_parent_rrf_weight: 0.78
+    entity_graph:
+      enabled: true
+      max_evidence: 12
+      source_chunks_per_evidence: 2
+      rrf_weight: 0.75
+    postprocess:
+      rerank_top_n: 8
+      context_top_n: 5
+      max_chunks_per_document: 4
+      exact_dedup: true
+      near_duplicate_threshold: 0.92
+      merge_adjacent_chunks: true
+      max_context_tokens: 7000
+    fallback:
+      enabled: true
+      max_attempts: 1
+      similarity_threshold: 0.12
+      use_original_query: true
+    client_overrides:
+      allowed: [page_size, include_content, include_positions]
+      page_size_min: 1
+      page_size_max: 50

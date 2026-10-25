@@ -1,0 +1,124 @@
+# 规格中的自研应用最小 Compose：只包含 Gateway/Worker 依赖，不含完整 RAGFlow 实现。
+name: rag-app
+
+services:
+  app-postgres:
+    image: ${APP_POSTGRES_IMAGE}
+    environment:
+      POSTGRES_DB: ${APP_POSTGRES_DATABASE}
+      POSTGRES_USER: ${APP_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/18/docker
+      TZ: UTC
+    volumes:
+      - app_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis-stack:
+    # 规格最小栈与完整拓扑使用同一个 Redis Stack；应用缓存连 DB 0，
+    # Celery Broker 连 DB 2；任务结果与真实 Job 状态不写 Redis。
+    image: ${REDIS_STACK_IMAGE}
+    environment:
+      REDIS_ARGS: >-
+        --appendonly yes
+        --appendfsync everysec
+        --requirepass ${REDIS_STACK_PASSWORD}
+        --maxmemory ${REDIS_STACK_MAXMEMORY:-1gb}
+        --maxmemory-policy noeviction
+    volumes:
+      - redis_stack_data:/data
+    healthcheck:
+      test: [CMD, redis-cli, -a, "${REDIS_STACK_PASSWORD}", ping]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  rag-app-schema-check:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ${RAG_APP_IMAGE}
+    env_file: ${RAG_APP_ENV_FILE:-.env.example}
+    # 这个最小规格不包含 RAGFlow，因此只检查自研应用数据库。
+    command: [python, -m, rag_service.cli, schema, check-app]
+    depends_on:
+      app-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  rag-app-bootstrap:
+    image: ${RAG_APP_IMAGE}
+    env_file: ${RAG_APP_ENV_FILE:-.env.example}
+    command: [python, -m, rag_service.cli, bootstrap, all]
+    depends_on:
+      rag-app-schema-check:
+        condition: service_completed_successfully
+      redis-stack:
+        condition: service_healthy
+    restart: "no"
+
+  rag-gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ${RAG_APP_IMAGE}
+    env_file: ${RAG_APP_ENV_FILE:-.env.example}
+    command: [uvicorn, "rag_service.api.main:app", --host, 0.0.0.0, --port, "8080"]
+    ports:
+      - "${RAG_APP_PORT}:8080"
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      redis-stack:
+        condition: service_healthy
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/live', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rag-worker:
+    image: ${RAG_APP_IMAGE}
+    env_file: ${RAG_APP_ENV_FILE:-.env.example}
+    command: [celery, -A, rag_service.workers.app, worker, --loglevel=INFO, "--concurrency=${WORKER_CONCURRENCY}"]
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      redis-stack:
+        condition: service_healthy
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+  rag-scheduler:
+    image: ${RAG_APP_IMAGE}
+    env_file: ${RAG_APP_ENV_FILE:-.env.example}
+    command: [celery, -A, rag_service.workers.app, beat, --loglevel=INFO]
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      redis-stack:
+        condition: service_healthy
+    volumes:
+      - upload_staging_data:/var/lib/rag/uploads
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+volumes:
+  app_postgres_data:
+  redis_stack_data:
+  upload_staging_data:

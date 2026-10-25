@@ -1,0 +1,23 @@
+{
+  "code": 0,
+  "data": {
+    "docs": [
+      {
+        "id": "11111111111111111111111111111111",
+        "dataset_id": "22222222222222222222222222222222",
+        "name": "parser-guide.pdf",
+        "location": "parser-guide.pdf",
+        "run": "DONE",
+        "progress": 1.0,
+        "progress_msg": "Indexing done. Task done.",
+        "chunk_count": 12,
+        "token_count": 4096,
+        "size": 123456,
+        "meta_fields": {
+          "product": "ragflow"
+        }
+      }
+    ],
+    "total": 1
+  }
+}

@@ -1,0 +1,112 @@
+# 外部存储迁移演练环境：它是一个完全独立的 Compose Project，只模拟公司数据库
+# 服务器，不包含 RAGFlow、Gateway、Worker 或 Scheduler。镜像版本固定在本文件中，
+# 因此切到 external 模式后，RAG 项目的 .env.ragflow 只需要连接信息而不需要 *_IMAGE。
+# 连接变量与 RAG Runtime 同名；端口表示宿主机映射端口，容器内部端口保持不变。
+name: lazytt-rag-external-storage-lab
+
+services:
+  postgres:
+    image: postgres:18.4-bookworm
+    # 这里只启动一个空 PostgreSQL 实例。业务角色、rag_app、rag_flow 及其表结构
+    # 必须由 DBA 后续手工执行受审计 SQL 创建，Compose 不参与数据库迁移。
+    # 768 MiB 足够本机演练；显式上限避免 Docker Desktop
+    # 把宿主机全部可用内存显示成该容器的潜在配额。
+    mem_limit: 768m
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      PGDATA: /var/lib/postgresql/18/docker
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${RAGFLOW_POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Atqc "SELECT 1" >/dev/null',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+  redis-stack:
+    image: redis/redis-stack-server:7.4.0-v8
+    # Redis 自身 maxmemory 为 512 MiB，额外空间留给模块、AOF 重写和进程开销。
+    mem_limit: 768m
+    environment:
+      REDIS_STACK_PASSWORD: ${REDIS_STACK_PASSWORD}
+      # 演练环境把容量限制为 512 MiB，避免与本机 RAG 栈并行时挤占过多内存。
+      # noeviction 会把容量不足暴露成写入失败，而不是静默删除 Celery 或 RAGFlow Key。
+      REDIS_ARGS: >-
+        --appendonly yes
+        --appendfsync everysec
+        --requirepass ${REDIS_STACK_PASSWORD}
+        --maxmemory 512mb
+        --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:${REDIS_STACK_PORT:-16379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_STACK_PASSWORD" --no-auth-warning ping | grep -q PONG']
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+  elasticsearch:
+    image: elasticsearch:8.11.3
+    # JVM Heap 固定 512 MiB，容器总上限额外覆盖 Off-Heap 与文件缓存开销。
+    mem_limit: 1536m
+    environment:
+      node.name: external-storage-lab
+      cluster.name: lazytt-rag-external-storage-lab
+      discovery.type: single-node
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      bootstrap.memory_lock: "false"
+      # 512 MiB 只用于空环境迁移演练，不代表生产容量建议。
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:${RAGFLOW_ES_PORT:-19200}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:$$ELASTIC_PASSWORD http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 30s
+    restart: unless-stopped
+
+  minio:
+    image: pgsty/minio:RELEASE.2026-03-25T00-00-00Z
+    mem_limit: 512m
+    command: ["server", "--console-address", ":9001", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    ports:
+      - "127.0.0.1:${RAGFLOW_MINIO_PORT:-19000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+volumes:
+  # 演练卷使用独立名称，绝不会复用或覆盖 lazytt-rag-storage 的正式本地卷。
+  postgres_data:
+  redis_data:
+  elasticsearch_data:
+  minio_data:

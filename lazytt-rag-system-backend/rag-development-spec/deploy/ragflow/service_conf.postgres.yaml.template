@@ -1,0 +1,45 @@
+ragflow:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9380
+
+admin:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9381
+
+postgres:
+  name: '${POSTGRES_DBNAME:-rag_flow}'
+  user: '${POSTGRES_USER:-rag_flow}'
+  password: '${POSTGRES_PASSWORD}'
+  host: '${POSTGRES_HOST:-ragflow-postgres}'
+  port: ${POSTGRES_PORT:-5432}
+  max_connections: 100
+  stale_timeout: 30
+
+minio:
+  user: '${MINIO_USER:-rag_flow}'
+  password: '${MINIO_PASSWORD}'
+  host: '${MINIO_HOST:-minio}:9000'
+  bucket: '${MINIO_BUCKET:-}'
+  prefix_path: '${MINIO_PREFIX_PATH:-}'
+
+es:
+  hosts: 'http://${ES_HOST:-elasticsearch}:9200'
+  username: '${ES_USER:-elastic}'
+  password: '${ELASTIC_PASSWORD}'
+
+redis:
+  db: 1
+  username: '${REDIS_USERNAME:-}'
+  password: '${REDIS_PASSWORD}'
+  # DB 1 为 RAGFlow 逻辑边界，与缓存 DB 0、Celery DB 2 隔离。
+  host: '${REDIS_HOST:-redis-stack}:${REDIS_PORT:-6379}'
+
+file_syncer:
+  max_concurrent_syncs: 4
+  sync_interval: 3
+
+user_default_llm:
+  default_models:
+    embedding_model:
+      api_key: ''
+      base_url: ''

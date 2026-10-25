@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "data": [
+    {
+      "id": "fixture-document-id",
+      "dataset_id": "fixture-dataset-id",
+      "name": "fixture.pdf",
+      "run": "UNSTART",
+      "size": 128
+    }
+  ],
+  "message": "success"
+}

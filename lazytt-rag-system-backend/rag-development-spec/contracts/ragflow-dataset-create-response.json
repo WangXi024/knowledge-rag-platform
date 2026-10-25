@@ -1,0 +1,10 @@
+{
+  "code": 0,
+  "data": {
+    "id": "fixture-dataset-id",
+    "name": "fixture-kb-safe-name",
+    "chunk_method": "naive",
+    "permission": "me"
+  },
+  "message": "success"
+}

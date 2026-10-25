@@ -1,0 +1,3 @@
+RAGFlow smoke fixture.
+The lifecycle test uses this synthetic, non-business document only.
+It verifies upload, parsing, chunk listing, retrieval, and deletion.

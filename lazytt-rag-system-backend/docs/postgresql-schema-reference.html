@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LazyTT RAG · PostgreSQL 表结构说明</title>
+  <style>
+    :root{--ink:#172321;--muted:#64746f;--line:#d9e5e0;--paper:#f5f8f6;--card:#fff;--brand:#087b68;--brand2:#0fac91;--soft:#e8f4ef;--warn:#a45d08;--shadow:0 14px 40px rgba(24,54,47,.08)}
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace} a{color:inherit}
+    .hero{background:linear-gradient(130deg,#092a24,#0a4e43 68%,#087b68);color:#fff;padding:62px max(28px,calc((100vw - 1440px)/2));position:relative;overflow:hidden}
+    .hero:after{content:"";position:absolute;width:420px;height:420px;border-radius:50%;background:rgba(255,255,255,.07);right:-100px;top:-190px}
+    .eyebrow{letter-spacing:.18em;text-transform:uppercase;color:#78e0c9;font-weight:800;font-size:12px} h1{font-size:clamp(34px,5vw,62px);line-height:1.08;margin:14px 0 18px} .lead{max-width:900px;color:#d4e8e2;font-size:18px;margin:0}
+    .scope{display:inline-flex;gap:9px;align-items:center;margin-top:24px;padding:9px 14px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.08)}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:28px auto 0;max-width:1120px}
+    .stat{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);border-radius:16px;padding:16px 18px} .stat b{display:block;font-size:28px} .stat span{color:#cbe1da;font-size:13px}
+    .layout{max-width:1480px;margin:0 auto;padding:32px 24px 72px;display:grid;grid-template-columns:270px minmax(0,1fr);gap:28px}
+    aside{position:sticky;top:20px;align-self:start;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow);max-height:calc(100vh - 40px);overflow:auto}
+    aside h2{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:0 0 12px} .nav{display:grid;gap:5px} .nav a{text-decoration:none;padding:8px 10px;border-radius:9px;color:#40514c} .nav a:hover{background:var(--soft);color:var(--brand)}
+    main{min-width:0} .toolbar{position:sticky;top:16px;z-index:5;display:flex;gap:12px;align-items:center;background:rgba(245,248,246,.92);backdrop-filter:blur(10px);padding:0 0 16px}
+    .search{width:100%;border:1px solid var(--line);background:#fff;border-radius:14px;padding:14px 16px;font:inherit;outline:none;box-shadow:0 6px 24px rgba(25,55,48,.05)} .search:focus{border-color:var(--brand2);box-shadow:0 0 0 4px rgba(15,172,145,.12)}
+    button{border:1px solid var(--line);background:#fff;border-radius:12px;padding:12px 15px;white-space:nowrap;cursor:pointer;color:var(--ink)} button:hover{border-color:var(--brand)}
+    .notice,.relation-card,.migration-card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:var(--shadow)} .notice h2,.relation-card h2,.migration-card h2{margin:0 0 10px;font-size:22px}
+    .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px} .chip{padding:5px 10px;border-radius:999px;background:var(--soft);color:#126c5d;font-size:12px;font-weight:700}
+    .flow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px} .flow div{padding:12px;border:1px solid var(--line);border-radius:12px;background:#f9fbfa} .flow code{color:var(--brand);font-weight:700}
+    details.table-card{background:#fff;border:1px solid var(--line);border-radius:20px;margin:0 0 18px;overflow:hidden;box-shadow:var(--shadow)} details.table-card[open]{border-color:#b8d7ce}
+    summary{list-style:none;cursor:pointer;padding:22px 24px;display:flex;align-items:center;justify-content:space-between;gap:14px} summary::-webkit-details-marker{display:none}
+    .titleline{display:flex;gap:13px;align-items:center;min-width:0} .table-no{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:var(--soft);color:var(--brand);font-weight:900;flex:0 0 auto} .titleline h3{margin:0;font-size:20px} .titleline p{margin:2px 0 0;color:var(--muted)} .count{font-size:12px;color:var(--muted);white-space:nowrap}
+    .body{border-top:1px solid var(--line);padding:22px 24px 26px} .responsibility{margin:0 0 18px;color:#41534e}
+    .field-hint{margin:0 0 10px;color:var(--muted);font-size:13px}.field-hint b{color:var(--brand)}
+    .field-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px} table{width:100%;border-collapse:collapse;min-width:920px} th{text-align:left;background:#eff5f2;color:#50615c;font-size:12px;letter-spacing:.04em;padding:11px 13px;position:sticky;top:0} td{padding:11px 13px;border-top:1px solid #e6eeeb;vertical-align:top} tbody tr.field-row{cursor:pointer} tbody tr.field-row:hover,tbody tr.field-row:has(.field-toggle:focus-visible){background:#f3faf7} tbody tr.field-row[data-open="true"]{background:#edf8f4} td code{color:#006c5c;font-weight:700} .yes{color:#087b68;font-weight:800} .no{color:#7a8783} .role{display:inline-block;margin:1px 4px 1px 0;padding:2px 7px;border-radius:999px;background:#eaf3ff;color:#29639a;font-size:11px}
+    .field-toggle{display:inline-flex;align-items:center;gap:7px;border:0;background:transparent;border-radius:7px;padding:2px 4px 2px 0;color:inherit;font:inherit;text-align:left}.field-toggle:hover{border:0}.field-toggle:focus-visible{outline:2px solid var(--brand2);outline-offset:2px}.field-caret{color:var(--brand);font-size:18px;line-height:1;transition:transform .16s ease}.field-toggle[aria-expanded="true"] .field-caret{transform:rotate(90deg)}
+    tr.field-detail-row:hover{background:transparent}tr.field-detail-row>td{padding:0;border-top:0;background:#edf8f4}.field-detail{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:4px 13px 15px 41px;border-top:1px dashed #cfe2dc}.field-detail section{padding:13px 14px;border:1px solid #d8e8e2;border-radius:11px;background:#fff}.field-detail h4{margin:0 0 5px;color:#126c5d;font-size:13px}.field-detail p{margin:0;color:#475954}
+    .rules{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px} .rule{border:1px solid var(--line);border-radius:12px;padding:13px 14px;background:#fbfdfc} .rule b{display:block;margin-bottom:5px} .rule ul{margin:0;padding-left:18px;color:#53645f} .empty{color:#8a9692}
+    details.example-record{margin-top:18px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fbfdfc} details.example-record[open]{border-color:#b8d7ce} details.example-record>summary{padding:13px 16px;color:#126c5d;font-weight:800} .example-record pre{margin:0;padding:16px;border-top:1px solid var(--line);overflow:auto;background:#10211d;color:#d8eee7;font-size:13px;line-height:1.55} .example-record code{font-weight:400}
+    .hidden{display:none!important} footer{max-width:1480px;margin:0 auto;padding:0 24px 50px;color:var(--muted)}
+    @media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}aside{position:relative;top:auto;max-height:none}.flow,.rules,.field-detail{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="eyebrow">LazyTT RAG · Database Reference</div>
+    <h1>PostgreSQL 表结构说明</h1>
+    <p class="lead">面向开发、联调和数据库迁移验收的可视化字段字典。页面只讲解自研 Gateway 的 <code>rag_app</code> Schema，不混入 RAGFlow 上游数据库。</p>
+    <div class="scope">结构事实来源：<code>rag-development-spec/database/schema.sql</code></div>
+    <div class="stats">
+      <div class="stat"><b>12</b><span>业务表</span></div>
+      <div class="stat"><b>207</b><span>业务字段</span></div>
+      <div class="stat"><b>15</b><span>外键关系</span></div>
+      <div class="stat"><b>30</b><span>显式索引</span></div>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <h2>表目录</h2>
+      <nav class="nav" id="nav"></nav>
+    </aside>
+    <main>
+      <div class="toolbar">
+        <input id="search" class="search" placeholder="搜索表名、字段名或中文含义…" aria-label="搜索数据库结构">
+        <button id="openAll" type="button">全部展开</button>
+        <button id="closeAll" type="button">全部收起</button>
+      </div>
+      <section class="notice">
+        <h2>范围边界</h2>
+        <p>本页包含 <strong>12 张自研业务表</strong>，以及 Alembic 自动维护的版本标记表。它不包含 RAGFlow 的 <code>rag_flow</code> 数据库、Elasticsearch 索引、Redis/Valkey Key、MinIO 对象，也不存在前端测试账号或本地登录用户表。</p>
+        <div class="chips"><span class="chip">Schema: rag_app</span><span class="chip">PostgreSQL 18.x</span><span class="chip">TENANT / SYSTEM 共享 Scope</span><span class="chip">UTC 时间</span><span class="chip">示例记录均为虚构数据</span></div>
+      </section>
+      <section class="relation-card">
+        <h2>核心数据关系</h2>
+        <p>知识库是根对象；逻辑文档拥有多个物理版本；解析完成后产生层级索引、实体和关系；摄取任务、查询、引用与反馈围绕这些核心对象记录运行状态。</p>
+        <div class="flow"><div><code>knowledge_base</code><br>知识库与 RAGFlow Dataset 映射</div><div><code>document_record → document_version</code><br>稳定文档入口与版本历史</div><div><code>index_node / entity / relation</code><br>自研侧车预索引</div><div><code>ingestion_job</code><br>异步上传、解析与更新任务</div><div><code>query_record → citation_record</code><br>检索问答审计与引用</div><div><code>feedback_record</code><br>用户对请求结果的反馈</div></div>
+      </section>
+      <div id="tables"></div>
+      <section class="migration-card" id="alembic-version">
+        <h2><code>alembic_version</code> · Schema 迁移版本</h2>
+        <p id="alembicDescription">由 Alembic 自动维护，只记录当前数据库已应用到哪个 Migration 版本。它不是业务表，也不应由业务接口直接读写。</p>
+        <div class="chips"><span class="chip">管理方：Alembic</span><span class="chip">用途：迁移版本判定</span><span class="chip">不要手工改值</span></div>
+      </section>
+    </main>
+  </div>
+  <footer>生成日期：2026-08-24 · 这是静态说明页；数据库结构变化后应重新核对 <code>schema.sql</code> 与 Alembic Migration。</footer>
+  <script id="schema-data" type="application/json">{"tables":[{"name":"config_profile","title":"版本化配置","description":"保存 Parser、Chunk、Embedding、Retrieval、Rerank、Prompt、Model 和 Cache Profile。 Profile 一旦发布不能原地改变语义，行为变化应新增版本。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"Profile 主键","roles":["主键"]},{"name":"profile_type","type":"VARCHAR(32)","required":"是","default":"—","description":"Profile 类型枚举","roles":[]},{"name":"name","type":"VARCHAR(64)","required":"是","default":"—","description":"Profile 名称，不含版本号","roles":[]},{"name":"version","type":"INTEGER","required":"是","default":"—","description":"正整数版本号","roles":[]},{"name":"description","type":"VARCHAR(512)","required":"否","default":"NULL","description":"人类可读说明","roles":[]},{"name":"config_json","type":"JSONB","required":"是","default":"—","description":"实际配置内容","roles":[]},{"name":"checksum_sha256","type":"CHAR(64)","required":"是","default":"—","description":"配置规范化后的校验值，用于发现同版本漂移","roles":[]},{"name":"enabled","type":"BOOLEAN","required":"是","default":"true","description":"是否允许新请求引用","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间，由触发器维护","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["profile_type","name","version"]],"check_names":["chk_config_profile_version","chk_config_profile_type"],"foreign_keys":[],"indexes":[{"name":"idx_config_profile_enabled","unique":false,"definition":"(profile_type, enabled)"}],"triggers":["trg_config_profile_updated_at"]},{"name":"knowledge_base","title":"知识库主表","description":"保存知识库的 Scope、Profile 绑定、RAGFlow Dataset 映射和知识库 Revision。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"自研系统知识库 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"由身份边界派生的隔离 Hash","roles":["隔离边界"]},{"name":"external_id","type":"VARCHAR(128)","required":"否","default":"NULL","description":"调用方提供的业务幂等标识","roles":[]},{"name":"name","type":"VARCHAR(128)","required":"是","default":"—","description":"知识库名称","roles":[]},{"name":"description","type":"VARCHAR(2048)","required":"否","default":"NULL","description":"知识库说明","roles":[]},{"name":"ragflow_dataset_id","type":"VARCHAR(64)","required":"否","default":"NULL","description":"对应的 RAGFlow Dataset ID","roles":[]},{"name":"parser_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"Parser Profile 完整引用，如 `office-default@1","roles":[]},{"name":"chunk_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"Chunk Profile 完整引用","roles":[]},{"name":"embedding_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"Embedding Profile 完整引用","roles":[]},{"name":"retrieval_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"Retrieval Profile 完整引用","roles":[]},{"name":"status","type":"VARCHAR(32)","required":"是","default":"—","description":"创建、可用、删除或失败状态","roles":[]},{"name":"revision","type":"BIGINT","required":"是","default":"0","description":"内容修订号；变化后参与缓存隔离","roles":[]},{"name":"row_version","type":"BIGINT","required":"是","default":"0","description":"数据库乐观锁版本","roles":[]},{"name":"last_error_code","type":"VARCHAR(64)","required":"否","default":"NULL","description":"最近一次稳定错误码","roles":[]},{"name":"last_error_message","type":"VARCHAR(512)","required":"否","default":"NULL","description":"最近一次脱敏错误摘要","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]},{"name":"deleted_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"软删除时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","external_id"],["ragflow_dataset_id"]],"check_names":["chk_knowledge_base_scope","chk_knowledge_base_revision","chk_knowledge_base_row_version","chk_knowledge_base_status"],"foreign_keys":[],"indexes":[{"name":"idx_knowledge_base_scope_status","unique":false,"definition":"(security_scope_id, status, updated_at)"},{"name":"idx_knowledge_base_scope_name","unique":false,"definition":"(security_scope_id, name)"}],"triggers":["trg_knowledge_base_updated_at"]},{"name":"document_record","title":"逻辑文档主表","description":"它是文档 API 和在线检索使用的稳定入口。文档更新期间，旧活动版本继续可用；新版本 成功后才在事务中切换活动版本。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"逻辑文档 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"文档隔离 Hash","roles":["外键","隔离边界"]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"所属知识库 ID","roles":["外键"]},{"name":"external_id","type":"VARCHAR(128)","required":"否","default":"NULL","description":"调用方文档标识；软删除后可以复用","roles":[]},{"name":"ragflow_document_id","type":"VARCHAR(64)","required":"否","default":"NULL","description":"当前活动版本对应的 RAGFlow 文档 ID","roles":[]},{"name":"active_version_id","type":"UUID","required":"否","default":"NULL","description":"当前活动 `document_version.id","roles":[]},{"name":"active_version_number","type":"INTEGER","required":"是","default":"1","description":"当前活动版本号","roles":[]},{"name":"document_revision","type":"BIGINT","required":"是","default":"1","description":"逻辑文档修订号，用于并发和缓存边界","roles":[]},{"name":"filename","type":"VARCHAR(255)","required":"是","default":"—","description":"用户可见原文件名","roles":[]},{"name":"safe_filename","type":"VARCHAR(255)","required":"是","default":"—","description":"清理后的安全文件名","roles":[]},{"name":"mime_type","type":"VARCHAR(128)","required":"是","default":"—","description":"服务端识别的 MIME 类型","roles":[]},{"name":"file_size_bytes","type":"BIGINT","required":"是","default":"—","description":"文件字节数","roles":[]},{"name":"content_sha256","type":"CHAR(64)","required":"是","default":"—","description":"文件内容 Hash，用于完整性和精确去重","roles":[]},{"name":"metadata_json","type":"JSONB","required":"否","default":"NULL","description":"用户元数据与自动抽取的结构化元数据","roles":[]},{"name":"parser_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"实际 Parser Profile 引用","roles":[]},{"name":"chunk_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"实际 Chunk Profile 引用","roles":[]},{"name":"status","type":"VARCHAR(32)","required":"是","default":"—","description":"上传、解析、索引、可用、失败或删除状态","roles":[]},{"name":"progress","type":"NUMERIC(5,4)","required":"是","default":"0","description":"0～1` 的统一处理进度","roles":[]},{"name":"chunk_count","type":"INTEGER","required":"是","default":"0","description":"当前活动版本 Chunk 数","roles":[]},{"name":"token_count","type":"BIGINT","required":"是","default":"0","description":"当前活动版本 Token 数","roles":[]},{"name":"row_version","type":"BIGINT","required":"是","default":"0","description":"乐观锁版本","roles":[]},{"name":"last_error_code","type":"VARCHAR(64)","required":"否","default":"NULL","description":"最近错误码","roles":[]},{"name":"last_error_message","type":"VARCHAR(1024)","required":"否","default":"NULL","description":"最近脱敏错误摘要","roles":[]},{"name":"engine_progress_message","type":"VARCHAR(2048)","required":"否","default":"NULL","description":"RAGFlow 当前解析阶段摘要","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]},{"name":"indexed_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"当前版本完成索引的时间","roles":["时间审计"]},{"name":"deleted_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"软删除时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["ragflow_document_id"]],"check_names":["chk_document_scope","chk_document_file_size","chk_document_progress","chk_document_chunk_count","chk_document_token_count","chk_document_row_version","chk_document_active_version_number","chk_document_revision","chk_document_status"],"foreign_keys":[{"name":"fk_document_knowledge_base","table":"document_record","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"}],"indexes":[{"name":"uk_document_external","unique":true,"definition":"(security_scope_id, knowledge_base_id, external_id) WHERE external_id IS NOT NULL AND deleted_at IS NULL"},{"name":"idx_document_scope_kb_status","unique":false,"definition":"(security_scope_id, knowledge_base_id, status, updated_at)"},{"name":"idx_document_scope_hash","unique":false,"definition":"(security_scope_id, knowledge_base_id, content_sha256)"},{"name":"idx_document_scope_filename","unique":false,"definition":"(security_scope_id, knowledge_base_id, filename)"},{"name":"idx_document_metadata_gin","unique":false,"definition":"USING GIN (metadata_json)"}],"triggers":["trg_document_record_updated_at"]},{"name":"document_version","title":"文档版本历史","description":"每次更新创建一条不可变候选版本。只有解析和索引成功的版本才能变成 `ACTIVE`，旧活动 版本随后变成 `RETIRED`。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"文档版本 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"版本隔离 Hash","roles":["外键","隔离边界"]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"所属知识库 ID","roles":["外键"]},{"name":"document_id","type":"UUID","required":"是","default":"—","description":"所属逻辑文档 ID","roles":["外键"]},{"name":"version_number","type":"INTEGER","required":"是","default":"—","description":"从 1 开始递增的版本号","roles":[]},{"name":"ragflow_document_id","type":"VARCHAR(64)","required":"否","default":"NULL","description":"此版本对应的 RAGFlow 物理文档 ID","roles":[]},{"name":"filename","type":"VARCHAR(255)","required":"是","default":"—","description":"此版本原文件名","roles":[]},{"name":"safe_filename","type":"VARCHAR(255)","required":"是","default":"—","description":"此版本安全文件名","roles":[]},{"name":"mime_type","type":"VARCHAR(128)","required":"是","default":"—","description":"MIME 类型","roles":[]},{"name":"file_size_bytes","type":"BIGINT","required":"是","default":"—","description":"文件字节数","roles":[]},{"name":"content_sha256","type":"CHAR(64)","required":"是","default":"—","description":"此版本内容 Hash","roles":[]},{"name":"metadata_json","type":"JSONB","required":"是","default":"{}","description":"此版本元数据快照","roles":[]},{"name":"parser_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"此版本 Parser Profile","roles":[]},{"name":"chunk_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"此版本 Chunk Profile","roles":[]},{"name":"status","type":"VARCHAR(32)","required":"是","default":"—","description":"PENDING`、处理中、`ACTIVE`、`RETIRED` 或 `FAILED","roles":[]},{"name":"requested_mode","type":"VARCHAR(32)","required":"是","default":"—","description":"调用方请求的 `AUTO` 或 `SAFE_REPLACE","roles":[]},{"name":"effective_mode","type":"VARCHAR(32)","required":"是","default":"—","description":"服务最终采用的更新模式","roles":[]},{"name":"chunk_count","type":"INTEGER","required":"是","default":"0","description":"此版本 Chunk 数","roles":[]},{"name":"token_count","type":"BIGINT","required":"是","default":"0","description":"此版本 Token 数","roles":[]},{"name":"last_error_code","type":"VARCHAR(64)","required":"否","default":"NULL","description":"版本处理错误码","roles":[]},{"name":"last_error_message","type":"VARCHAR(1024)","required":"否","default":"NULL","description":"版本处理错误摘要","roles":[]},{"name":"activated_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"成为活动版本的时间","roles":["时间审计"]},{"name":"retired_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"被新版本替代的时间","roles":["时间审计"]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","document_id","version_number"],["ragflow_document_id"]],"check_names":["chk_document_version_scope","chk_document_version_number","chk_document_version_file_size","chk_document_version_chunk_count","chk_document_version_token_count","chk_document_version_status","chk_document_version_requested_mode","chk_document_version_effective_mode"],"foreign_keys":[{"name":"fk_document_version_knowledge_base","table":"document_version","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_document_version_document","table":"document_version","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"}],"indexes":[{"name":"uk_document_version_active","unique":true,"definition":"(security_scope_id, document_id) WHERE status = 'ACTIVE'"},{"name":"idx_document_version_scope_document","unique":false,"definition":"(security_scope_id, document_id, version_number)"},{"name":"idx_document_version_scope_status","unique":false,"definition":"(security_scope_id, status, updated_at)"}],"triggers":["trg_document_version_updated_at"]},{"name":"document_index_node","title":"层级与摘要侧车索引","description":"保存 Parent、Section、Summary 节点及其 Embedding。命中后必须通过源 Chunk ID 回读 RAGFlow 原文，不能直接把摘要当成引用正文。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"节点 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"节点隔离 Hash","roles":["外键","隔离边界"]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"所属知识库","roles":["外键"]},{"name":"document_id","type":"UUID","required":"是","default":"—","description":"所属逻辑文档","roles":["外键"]},{"name":"node_type","type":"VARCHAR(16)","required":"是","default":"—","description":"PARENT`、`SECTION` 或 `SUMMARY","roles":[]},{"name":"ordinal","type":"INTEGER","required":"是","default":"—","description":"同类型节点在文档中的顺序，从 0 开始","roles":[]},{"name":"content","type":"TEXT","required":"是","default":"—","description":"节点的聚合内容或摘要文本","roles":[]},{"name":"source_chunk_ids_json","type":"JSONB","required":"是","default":"—","description":"节点对应的真实 RAGFlow Chunk ID 数组","roles":[]},{"name":"embedding_bytes","type":"BYTEA","required":"否","default":"NULL","description":"固定顺序 FLOAT32 向量字节","roles":[]},{"name":"embedding_dimension","type":"INTEGER","required":"是","default":"0","description":"向量维度；未生成时为 0","roles":[]},{"name":"metadata_json","type":"JSONB","required":"是","default":"{}","description":"标题、页码和层级等辅助元数据","roles":[]},{"name":"index_version","type":"INTEGER","required":"是","default":"1","description":"侧车索引算法版本","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","document_id","node_type","ordinal","index_version"]],"check_names":["chk_index_node_scope","chk_index_node_type","chk_index_node_ordinal","chk_index_node_embedding_dimension","chk_index_node_version"],"foreign_keys":[{"name":"fk_index_node_knowledge_base","table":"document_index_node","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_index_node_document","table":"document_index_node","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"}],"indexes":[{"name":"idx_index_node_scope_kb_type","unique":false,"definition":"(security_scope_id, knowledge_base_id, node_type)"},{"name":"idx_index_node_source_chunks_gin","unique":false,"definition":"USING GIN (source_chunk_ids_json)"}],"triggers":[]},{"name":"document_entity","title":"文档实体侧车索引","description":"保存确定性抽取的实体、别名和证据 Chunk，不保存 RAGFlow 原文副本。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"实体记录 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"实体隔离 Hash","roles":["外键","隔离边界"]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"所属知识库","roles":["外键"]},{"name":"document_id","type":"UUID","required":"是","default":"—","description":"所属逻辑文档","roles":["外键"]},{"name":"canonical_name","type":"VARCHAR(128)","required":"是","default":"—","description":"用于展示的规范名称","roles":[]},{"name":"normalized_name","type":"VARCHAR(128)","required":"是","default":"—","description":"用于匹配和去重的标准化名称","roles":[]},{"name":"entity_type","type":"VARCHAR(32)","required":"是","default":"—","description":"组织、技术、日期、版本等实体类型","roles":[]},{"name":"aliases_json","type":"JSONB","required":"是","default":"—","description":"实体别名数组","roles":[]},{"name":"source_chunk_ids_json","type":"JSONB","required":"是","default":"—","description":"出现实体验证据的 RAGFlow Chunk ID","roles":[]},{"name":"mention_count","type":"INTEGER","required":"是","default":"1","description":"文档中出现次数，必须大于 0","roles":[]},{"name":"metadata_json","type":"JSONB","required":"是","default":"{}","description":"抽取器和位置等辅助元数据","roles":[]},{"name":"index_version","type":"INTEGER","required":"是","default":"1","description":"实体索引算法版本","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","document_id","normalized_name","index_version"]],"check_names":["chk_document_entity_scope","chk_document_entity_mentions","chk_document_entity_version"],"foreign_keys":[{"name":"fk_document_entity_knowledge_base","table":"document_entity","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_document_entity_document","table":"document_entity","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"}],"indexes":[{"name":"idx_document_entity_scope_kb_name","unique":false,"definition":"(security_scope_id, knowledge_base_id, normalized_name)"},{"name":"idx_document_entity_source_chunks_gin","unique":false,"definition":"USING GIN (source_chunk_ids_json)"}],"triggers":[]},{"name":"entity_relation","title":"轻量实体关系","description":"保存文档中明确出现的主体—谓词—客体关系。它是轻量导航索引，不是完整知识图谱。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"关系记录 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"关系隔离 Hash","roles":["外键","隔离边界"]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"所属知识库","roles":["外键"]},{"name":"document_id","type":"UUID","required":"是","default":"—","description":"所属逻辑文档","roles":["外键"]},{"name":"subject_name","type":"VARCHAR(128)","required":"是","default":"—","description":"主体展示名称","roles":[]},{"name":"subject_normalized","type":"VARCHAR(128)","required":"是","default":"—","description":"主体标准化名称","roles":[]},{"name":"predicate","type":"VARCHAR(64)","required":"是","default":"—","description":"关系谓词","roles":[]},{"name":"object_name","type":"VARCHAR(128)","required":"是","default":"—","description":"客体展示名称","roles":[]},{"name":"object_normalized","type":"VARCHAR(128)","required":"是","default":"—","description":"客体标准化名称","roles":[]},{"name":"source_chunk_ids_json","type":"JSONB","required":"是","default":"—","description":"支撑该关系的真实 Chunk ID","roles":[]},{"name":"confidence","type":"NUMERIC(5,4)","required":"是","default":"1","description":"0～1` 抽取置信度，不是检索相似度","roles":[]},{"name":"metadata_json","type":"JSONB","required":"是","default":"{}","description":"抽取位置和规则等辅助信息","roles":[]},{"name":"index_version","type":"INTEGER","required":"是","default":"1","description":"关系索引算法版本","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","document_id","subject_normalized","predicate","object_normalized","index_version"]],"check_names":["chk_entity_relation_scope","chk_relation_confidence","chk_entity_relation_version"],"foreign_keys":[{"name":"fk_entity_relation_knowledge_base","table":"entity_relation","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_entity_relation_document","table":"entity_relation","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"}],"indexes":[{"name":"idx_entity_relation_scope_kb_subject","unique":false,"definition":"(security_scope_id, knowledge_base_id, subject_normalized)"},{"name":"idx_entity_relation_scope_kb_object","unique":false,"definition":"(security_scope_id, knowledge_base_id, object_normalized)"},{"name":"idx_entity_relation_source_chunks_gin","unique":false,"definition":"USING GIN (source_chunk_ids_json)"}],"triggers":[]},{"name":"ingestion_job","title":"异步摄取任务","description":"保存上传、解析、重解析、文档更新、删除和清理任务，并支持 Worker 认领、租约、有限 重试和取消。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"Job ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"Job 隔离 Hash","roles":["外键","隔离边界"]},{"name":"job_type","type":"VARCHAR(32)","required":"是","default":"—","description":"Job 类型枚举","roles":[]},{"name":"status","type":"VARCHAR(32)","required":"是","default":"—","description":"等待、运行、重试、成功、失败或取消状态","roles":[]},{"name":"knowledge_base_id","type":"UUID","required":"否","default":"NULL","description":"相关知识库；全局清理任务可以为空","roles":["外键"]},{"name":"document_id","type":"UUID","required":"否","default":"NULL","description":"相关逻辑文档；知识库级任务可以为空","roles":["外键"]},{"name":"progress","type":"NUMERIC(5,4)","required":"是","default":"0","description":"0～1` 的任务进度","roles":[]},{"name":"attempt","type":"INTEGER","required":"是","default":"0","description":"已执行次数","roles":[]},{"name":"max_attempts","type":"INTEGER","required":"是","default":"2","description":"最大执行次数","roles":[]},{"name":"payload_json","type":"JSONB","required":"否","default":"NULL","description":"类型特定输入；不得写入明文 Secret","roles":[]},{"name":"result_json","type":"JSONB","required":"否","default":"NULL","description":"类型特定结果摘要","roles":[]},{"name":"error_code","type":"VARCHAR(64)","required":"否","default":"NULL","description":"稳定错误码","roles":[]},{"name":"error_message","type":"VARCHAR(1024)","required":"否","default":"NULL","description":"脱敏错误摘要","roles":[]},{"name":"next_retry_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"下次允许重试时间","roles":["时间审计"]},{"name":"locked_by","type":"VARCHAR(128)","required":"否","default":"NULL","description":"当前 Worker 标识","roles":[]},{"name":"locked_until","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"Worker 租约截止时间","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"started_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"首次开始时间","roles":["时间审计"]},{"name":"finished_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"最终结束时间","roles":["时间审计"]},{"name":"updated_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"最近更新时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"]],"check_names":["chk_job_scope","chk_job_progress","chk_job_attempt","chk_job_type","chk_job_status"],"foreign_keys":[{"name":"fk_job_knowledge_base","table":"ingestion_job","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_job_document","table":"ingestion_job","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"}],"indexes":[{"name":"idx_job_scope_claim","unique":false,"definition":"(security_scope_id, status, next_retry_at, locked_until, created_at)"},{"name":"idx_job_scope_document","unique":false,"definition":"(security_scope_id, document_id, created_at)"},{"name":"idx_job_scope_kb","unique":false,"definition":"(security_scope_id, knowledge_base_id, created_at)"}],"triggers":["trg_ingestion_job_updated_at"]},{"name":"idempotency_record","title":"写请求幂等记录","description":"保存请求指纹和已完成响应快照，使相同 Scope 的重复写请求不会创建重复资源。","fields":[{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"复合主键；隔离 Hash","roles":["主键","隔离边界"]},{"name":"idempotency_key","type":"VARCHAR(128)","required":"是","default":"—","description":"复合主键；调用方提供的幂等键","roles":["主键"]},{"name":"http_method","type":"VARCHAR(8)","required":"是","default":"—","description":"复合主键；HTTP 方法","roles":["主键"]},{"name":"request_path","type":"VARCHAR(255)","required":"是","default":"—","description":"复合主键；接口路径","roles":["主键"]},{"name":"request_sha256","type":"CHAR(64)","required":"是","default":"—","description":"请求规范化内容 Hash，防止同键不同请求","roles":[]},{"name":"processing_status","type":"VARCHAR(16)","required":"是","default":"—","description":"PROCESSING`、`COMPLETED` 或 `FAILED","roles":[]},{"name":"response_status","type":"SMALLINT","required":"否","default":"NULL","description":"已完成响应 HTTP 状态码","roles":[]},{"name":"response_json","type":"JSONB","required":"否","default":"NULL","description":"可安全重放的响应快照","roles":[]},{"name":"resource_id","type":"UUID","required":"否","default":"NULL","description":"创建或操作的资源 ID","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]},{"name":"expires_at","type":"TIMESTAMPTZ","required":"是","default":"—","description":"幂等记录过期时间，必须晚于创建时间","roles":["时间审计"]}],"primary_keys":["security_scope_id","idempotency_key","http_method","request_path"],"unique_rules":[],"check_names":["chk_idempotency_scope","chk_idempotency_http_status","chk_idempotency_expiry","chk_idempotency_status"],"foreign_keys":[],"indexes":[{"name":"idx_idempotency_scope_expiry","unique":false,"definition":"(security_scope_id, expires_at)"}],"triggers":[]},{"name":"query_record","title":"检索与问答审计","description":"保存脱敏问题、请求状态、缓存状态、回答和诊断统计，不应记录凭据或未经授权的完整 业务上下文。","fields":[{"name":"request_id","type":"UUID","required":"是","default":"—","description":"请求主键，同时用于查询状态与取消","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"请求隔离 Hash","roles":["隔离边界"]},{"name":"request_status","type":"VARCHAR(32)","required":"是","default":"—","description":"接受、运行、完成、失败或取消状态","roles":[]},{"name":"outcome","type":"VARCHAR(32)","required":"否","default":"NULL","description":"success`、`no_evidence`、`refused` 或 `cancelled","roles":[]},{"name":"query_sha256","type":"CHAR(64)","required":"是","default":"—","description":"原问题 Hash","roles":[]},{"name":"query_redacted","type":"TEXT","required":"否","default":"NULL","description":"脱敏后的原问题","roles":[]},{"name":"effective_query_redacted","type":"TEXT","required":"否","default":"NULL","description":"脱敏后的 Rewrite/翻译问题","roles":[]},{"name":"knowledge_base_ids_json","type":"JSONB","required":"是","default":"—","description":"本次查询的知识库 ID 数组","roles":[]},{"name":"retrieval_profile_ref","type":"VARCHAR(128)","required":"是","default":"—","description":"Retrieval Profile 引用","roles":[]},{"name":"prompt_profile_ref","type":"VARCHAR(128)","required":"否","default":"NULL","description":"问答时使用的 Prompt Profile","roles":[]},{"name":"model_profile_ref","type":"VARCHAR(128)","required":"否","default":"NULL","description":"问答时使用的 Model Profile","roles":[]},{"name":"cache_status","type":"VARCHAR(32)","required":"是","default":"BYPASS","description":"绕过、未命中、精确命中、语义命中或写入失败","roles":[]},{"name":"candidate_count","type":"INTEGER","required":"是","default":"0","description":"融合后候选数","roles":[]},{"name":"context_count","type":"INTEGER","required":"是","default":"0","description":"送入 LLM 的上下文数","roles":[]},{"name":"answer_text","type":"TEXT","required":"否","default":"NULL","description":"最终回答文本","roles":[]},{"name":"timings_json","type":"JSONB","required":"否","default":"NULL","description":"缓存、检索、生成等阶段耗时","roles":[]},{"name":"warnings_json","type":"JSONB","required":"否","default":"NULL","description":"降级和非致命警告数组","roles":[]},{"name":"prompt_tokens","type":"INTEGER","required":"否","default":"NULL","description":"输入 Token 数","roles":[]},{"name":"completion_tokens","type":"INTEGER","required":"否","default":"NULL","description":"输出 Token 数","roles":[]},{"name":"total_tokens","type":"INTEGER","required":"否","default":"NULL","description":"总 Token 数","roles":[]},{"name":"error_code","type":"VARCHAR(64)","required":"否","default":"NULL","description":"请求失败错误码","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"请求创建时间","roles":["时间审计"]},{"name":"completed_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"请求结束时间","roles":["时间审计"]},{"name":"expires_at","type":"TIMESTAMPTZ","required":"否","default":"NULL","description":"审计记录清理时间","roles":["时间审计"]}],"primary_keys":["request_id"],"unique_rules":[["security_scope_id","request_id"]],"check_names":["chk_query_scope","chk_query_counts","chk_query_token_counts","chk_query_status","chk_query_outcome","chk_query_cache"],"foreign_keys":[],"indexes":[{"name":"idx_query_scope_created","unique":false,"definition":"(security_scope_id, created_at)"},{"name":"idx_query_scope_outcome","unique":false,"definition":"(security_scope_id, outcome, created_at)"},{"name":"idx_query_expiry","unique":false,"definition":"(expires_at)"},{"name":"idx_query_kb_ids_gin","unique":false,"definition":"USING GIN (knowledge_base_ids_json)"}],"triggers":[]},{"name":"citation_record","title":"回答引用","description":"保存一次问答实际使用的来源、顺序、页码、坐标、摘录和检索/重排分数。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"引用记录 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"引用隔离 Hash","roles":["外键","隔离边界"]},{"name":"request_id","type":"UUID","required":"是","default":"—","description":"所属 `query_record.request_id","roles":["外键"]},{"name":"ordinal","type":"INTEGER","required":"是","default":"—","description":"引用顺序，从 0 开始","roles":[]},{"name":"label","type":"VARCHAR(16)","required":"是","default":"—","description":"回答中显示的 `C1`、`C2` 等标签","roles":[]},{"name":"knowledge_base_id","type":"UUID","required":"是","default":"—","description":"来源知识库","roles":["外键"]},{"name":"document_id","type":"UUID","required":"是","default":"—","description":"来源逻辑文档","roles":["外键"]},{"name":"engine_chunk_id","type":"VARCHAR(128)","required":"是","default":"—","description":"RAGFlow/搜索引擎 Chunk ID","roles":[]},{"name":"document_name","type":"VARCHAR(255)","required":"是","default":"—","description":"来源文件名快照","roles":[]},{"name":"heading_path_json","type":"JSONB","required":"否","default":"NULL","description":"标题层级路径","roles":[]},{"name":"page_start","type":"INTEGER","required":"否","default":"NULL","description":"起始页；不能为负数","roles":[]},{"name":"page_end","type":"INTEGER","required":"否","default":"NULL","description":"结束页；不能为负数","roles":[]},{"name":"positions_json","type":"JSONB","required":"否","default":"NULL","description":"页面坐标或结构位置数组","roles":[]},{"name":"quote_text","type":"TEXT","required":"是","default":"—","description":"经边界验证的引用摘录","roles":[]},{"name":"retrieval_score","type":"NUMERIC(10,8)","required":"否","default":"NULL","description":"检索融合分数","roles":[]},{"name":"rerank_score","type":"NUMERIC(10,8)","required":"否","default":"NULL","description":"外部 Cross-Encoder 重排分数","roles":[]},{"name":"verification_status","type":"VARCHAR(32)","required":"是","default":"—","description":"VALID`、`INVALID` 或 `UNVERIFIED","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"],["security_scope_id","request_id","label"]],"check_names":["chk_citation_scope","chk_citation_ordinal","chk_citation_pages","chk_citation_status"],"foreign_keys":[{"name":"fk_citation_query","table":"citation_record","columns":["security_scope_id","request_id"],"target":"query_record","target_columns":["security_scope_id","request_id"],"on_delete":"CASCADE"},{"name":"fk_citation_knowledge_base","table":"citation_record","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_citation_document","table":"citation_record","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"}],"indexes":[{"name":"idx_citation_scope_document","unique":false,"definition":"(security_scope_id, document_id, created_at)"}],"triggers":[]},{"name":"feedback_record","title":"用户反馈","description":"保存对某次回答的结构化反馈，可用于离线评估，不直接改变在线索引。","fields":[{"name":"id","type":"UUID","required":"是","default":"—","description":"反馈 ID","roles":["主键"]},{"name":"security_scope_id","type":"CHAR(64)","required":"是","default":"—","description":"反馈隔离 Hash","roles":["外键","隔离边界"]},{"name":"request_id","type":"UUID","required":"是","default":"—","description":"所属问答请求 ID","roles":["外键"]},{"name":"rating","type":"SMALLINT","required":"否","default":"NULL","description":"只允许 `1` 或 `-1","roles":[]},{"name":"feedback_type","type":"VARCHAR(32)","required":"是","default":"—","description":"有用、无用、答案错误、引用错误等类型","roles":[]},{"name":"comment_text","type":"TEXT","required":"否","default":"NULL","description":"用户补充说明","roles":[]},{"name":"corrected_answer","type":"TEXT","required":"否","default":"NULL","description":"用户提供的参考纠正答案","roles":[]},{"name":"created_at","type":"TIMESTAMPTZ","required":"是","default":"CURRENT_TIMESTAMP","description":"创建时间","roles":["时间审计"]}],"primary_keys":["id"],"unique_rules":[["security_scope_id","id"]],"check_names":["chk_feedback_scope","chk_feedback_rating","chk_feedback_type"],"foreign_keys":[{"name":"fk_feedback_query","table":"feedback_record","columns":["security_scope_id","request_id"],"target":"query_record","target_columns":["security_scope_id","request_id"],"on_delete":"CASCADE"}],"indexes":[{"name":"idx_feedback_scope_request","unique":false,"definition":"(security_scope_id, request_id, created_at)"},{"name":"idx_feedback_scope_type","unique":false,"definition":"(security_scope_id, feedback_type, created_at)"}],"triggers":[]}],"relations":[{"name":"fk_document_knowledge_base","table":"document_record","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_document_version_knowledge_base","table":"document_version","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_document_version_document","table":"document_version","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_index_node_knowledge_base","table":"document_index_node","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_index_node_document","table":"document_index_node","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_document_entity_knowledge_base","table":"document_entity","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_document_entity_document","table":"document_entity","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_entity_relation_knowledge_base","table":"entity_relation","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_entity_relation_document","table":"entity_relation","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"CASCADE"},{"name":"fk_job_knowledge_base","table":"ingestion_job","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_job_document","table":"ingestion_job","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_citation_query","table":"citation_record","columns":["security_scope_id","request_id"],"target":"query_record","target_columns":["security_scope_id","request_id"],"on_delete":"CASCADE"},{"name":"fk_citation_knowledge_base","table":"citation_record","columns":["security_scope_id","knowledge_base_id"],"target":"knowledge_base","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_citation_document","table":"citation_record","columns":["security_scope_id","document_id"],"target":"document_record","target_columns":["security_scope_id","id"],"on_delete":"RESTRICT"},{"name":"fk_feedback_query","table":"feedback_record","columns":["security_scope_id","request_id"],"target":"query_record","target_columns":["security_scope_id","request_id"],"on_delete":"CASCADE"}],"alembic":{"title":"自研 Schema 版本标记","description":"该表是 `rag_app` Schema 的第 13 张物理表，只保存当前 Alembic Revision。","fields":[{"name":"version_num","type":"VARCHAR(32)","required":"是","default":"—","description":"主键"}]}}</script>
+  <script id="example-data" type="application/json">
+{
+  "config_profile": {
+    "id": "10000000-0000-4000-8000-000000000001",
+    "profile_type": "PARSER",
+    "name": "deepdoc-default",
+    "version": 1,
+    "description": "通用 PDF 文档解析配置",
+    "config_json": {
+      "ragflow": {
+        "chunk_method": "naive",
+        "parser_config": {
+          "layout_recognize": "DeepDOC"
+        }
+      }
+    },
+    "checksum_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "enabled": true,
+    "created_at": "2026-08-20T07:00:00Z",
+    "updated_at": "2026-08-20T07:00:00Z"
+  },
+  "knowledge_base": {
+    "id": "20000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "external_id": "kb-demo-battery",
+    "name": "电池技术资料库",
+    "description": "用于演示锂离子电池资料检索",
+    "ragflow_dataset_id": "11111111111111111111111111111111",
+    "parser_profile_ref": "deepdoc-default@1",
+    "chunk_profile_ref": "general-512@1",
+    "embedding_profile_ref": "embedding-openai-compatible@3",
+    "retrieval_profile_ref": "hybrid-default@1",
+    "status": "READY",
+    "revision": 3,
+    "row_version": 2,
+    "last_error_code": null,
+    "last_error_message": null,
+    "created_at": "2026-08-20T07:01:00Z",
+    "updated_at": "2026-08-20T07:08:30Z",
+    "deleted_at": null
+  },
+  "document_record": {
+    "id": "30000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "external_id": "doc-battery-soh",
+    "ragflow_document_id": "22222222222222222222222222222222",
+    "active_version_id": "40000000-0000-4000-8000-000000000001",
+    "active_version_number": 1,
+    "document_revision": 1,
+    "filename": "锂离子电池SOH估计.pdf",
+    "safe_filename": "battery-soh-estimation.pdf",
+    "mime_type": "application/pdf",
+    "file_size_bytes": 2202009,
+    "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadata_json": {
+      "source": "user-upload",
+      "language": "zh-CN",
+      "pages": 11
+    },
+    "parser_profile_ref": "deepdoc-default@1",
+    "chunk_profile_ref": "general-512@1",
+    "status": "READY",
+    "progress": 1,
+    "chunk_count": 48,
+    "token_count": 12640,
+    "row_version": 4,
+    "last_error_code": null,
+    "last_error_message": null,
+    "engine_progress_message": "解析与索引已完成",
+    "created_at": "2026-08-20T07:05:31Z",
+    "updated_at": "2026-08-20T07:08:30Z",
+    "indexed_at": "2026-08-20T07:08:28Z",
+    "deleted_at": null
+  },
+  "document_version": {
+    "id": "40000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "version_number": 1,
+    "ragflow_document_id": "22222222222222222222222222222222",
+    "filename": "锂离子电池SOH估计.pdf",
+    "safe_filename": "battery-soh-estimation.pdf",
+    "mime_type": "application/pdf",
+    "file_size_bytes": 2202009,
+    "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadata_json": {
+      "source": "user-upload",
+      "language": "zh-CN",
+      "pages": 11
+    },
+    "parser_profile_ref": "deepdoc-default@1",
+    "chunk_profile_ref": "general-512@1",
+    "status": "ACTIVE",
+    "requested_mode": "AUTO",
+    "effective_mode": "AUTO",
+    "chunk_count": 48,
+    "token_count": 12640,
+    "last_error_code": null,
+    "last_error_message": null,
+    "activated_at": "2026-08-20T07:08:30Z",
+    "retired_at": null,
+    "created_at": "2026-08-20T07:05:31Z",
+    "updated_at": "2026-08-20T07:08:30Z"
+  },
+  "document_index_node": {
+    "id": "50000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "node_type": "SECTION",
+    "ordinal": 0,
+    "content": "本节介绍电池健康状态（SOH）的定义、估计方法与主要影响因素。",
+    "source_chunk_ids_json": [
+      "chunk-demo-001",
+      "chunk-demo-002"
+    ],
+    "embedding_bytes": "<BYTEA：4096 字节，展示时省略>",
+    "embedding_dimension": 1024,
+    "metadata_json": {
+      "heading_path": [
+        "1 电池SOH估计"
+      ],
+      "page_start": 1,
+      "page_end": 3
+    },
+    "index_version": 1,
+    "created_at": "2026-08-20T07:08:29Z",
+    "updated_at": "2026-08-20T07:08:29Z"
+  },
+  "document_entity": {
+    "id": "60000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "canonical_name": "电池健康状态",
+    "normalized_name": "电池健康状态",
+    "entity_type": "CONCEPT",
+    "aliases_json": [
+      "SOH",
+      "State of Health"
+    ],
+    "source_chunk_ids_json": [
+      "chunk-demo-001",
+      "chunk-demo-007"
+    ],
+    "mention_count": 8,
+    "metadata_json": {
+      "language": "zh-CN"
+    },
+    "index_version": 1,
+    "created_at": "2026-08-20T07:08:29Z",
+    "updated_at": "2026-08-20T07:08:29Z"
+  },
+  "entity_relation": {
+    "id": "70000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "subject_name": "电池健康状态",
+    "subject_normalized": "电池健康状态",
+    "predicate": "受影响于",
+    "object_name": "充放电循环次数",
+    "object_normalized": "充放电循环次数",
+    "source_chunk_ids_json": [
+      "chunk-demo-007"
+    ],
+    "confidence": 0.93,
+    "metadata_json": {
+      "evidence": "正文明确陈述"
+    },
+    "index_version": 1,
+    "created_at": "2026-08-20T07:08:29Z",
+    "updated_at": "2026-08-20T07:08:29Z"
+  },
+  "ingestion_job": {
+    "id": "80000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "job_type": "PARSE",
+    "status": "SUCCEEDED",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "progress": 1,
+    "attempt": 1,
+    "max_attempts": 2,
+    "payload_json": {
+      "schema_version": 1,
+      "delete_existing": false
+    },
+    "result_json": {
+      "chunk_count": 48,
+      "token_count": 12640
+    },
+    "error_code": null,
+    "error_message": null,
+    "next_retry_at": null,
+    "locked_by": null,
+    "locked_until": null,
+    "created_at": "2026-08-20T07:05:31Z",
+    "started_at": "2026-08-20T07:05:35Z",
+    "finished_at": "2026-08-20T07:08:30Z",
+    "updated_at": "2026-08-20T07:08:30Z"
+  },
+  "idempotency_record": {
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "idempotency_key": "demo-upload-20260820-001",
+    "http_method": "POST",
+    "request_path": "/v1/knowledge-bases/20000000-0000-4000-8000-000000000001/documents",
+    "request_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "processing_status": "COMPLETED",
+    "response_status": 202,
+    "response_json": {
+      "data": {
+        "document_id": "30000000-0000-4000-8000-000000000001",
+        "status": "RECEIVED"
+      }
+    },
+    "resource_id": "30000000-0000-4000-8000-000000000001",
+    "created_at": "2026-08-20T07:05:31Z",
+    "expires_at": "2026-08-21T07:05:31Z"
+  },
+  "query_record": {
+    "request_id": "90000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "request_status": "COMPLETED",
+    "outcome": "success",
+    "query_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "query_redacted": "锂离子电池 SOH 的主要影响因素是什么？",
+    "effective_query_redacted": "锂离子电池健康状态的主要影响因素是什么？",
+    "knowledge_base_ids_json": [
+      "20000000-0000-4000-8000-000000000001"
+    ],
+    "retrieval_profile_ref": "hybrid-default@1",
+    "prompt_profile_ref": "rag-answer-zh@1",
+    "model_profile_ref": "answer-openai-compatible@4",
+    "cache_status": "MISS",
+    "candidate_count": 8,
+    "context_count": 4,
+    "answer_text": "SOH 主要受循环次数、温度、充放电倍率和存储条件影响。[C1]",
+    "timings_json": {
+      "retrieval_ms": 82,
+      "rerank_ms": 37,
+      "generation_ms": 1260
+    },
+    "warnings_json": [],
+    "prompt_tokens": 1250,
+    "completion_tokens": 180,
+    "total_tokens": 1430,
+    "error_code": null,
+    "created_at": "2026-08-20T07:12:00Z",
+    "completed_at": "2026-08-20T07:12:02Z",
+    "expires_at": "2026-11-18T07:12:00Z"
+  },
+  "citation_record": {
+    "id": "a0000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "request_id": "90000000-0000-4000-8000-000000000001",
+    "ordinal": 0,
+    "label": "C1",
+    "knowledge_base_id": "20000000-0000-4000-8000-000000000001",
+    "document_id": "30000000-0000-4000-8000-000000000001",
+    "engine_chunk_id": "chunk-demo-007",
+    "document_name": "锂离子电池SOH估计.pdf",
+    "heading_path_json": [
+      "1 电池SOH估计",
+      "1.2 影响因素"
+    ],
+    "page_start": 2,
+    "page_end": 2,
+    "positions_json": [
+      {
+        "page": 2,
+        "bbox": [84.2, 126.4, 510.8, 188.6]
+      }
+    ],
+    "quote_text": "循环次数、环境温度和充放电倍率都会影响锂离子电池的健康状态。",
+    "retrieval_score": 0.87654321,
+    "rerank_score": 0.92345678,
+    "verification_status": "VALID",
+    "created_at": "2026-08-20T07:12:02Z"
+  },
+  "feedback_record": {
+    "id": "b0000000-0000-4000-8000-000000000001",
+    "security_scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "request_id": "90000000-0000-4000-8000-000000000001",
+    "rating": 1,
+    "feedback_type": "helpful",
+    "comment_text": "回答简洁，引用位置准确。",
+    "corrected_answer": null,
+    "created_at": "2026-08-20T07:13:10Z"
+  }
+}
+  </script>
+  <script>
+    // 页面只在浏览器内渲染已嵌入的数据，不发送网络请求，也不会读取数据库凭据。
+    const DATA=JSON.parse(document.getElementById('schema-data').textContent);
+    const EXAMPLES=JSON.parse(document.getElementById('example-data').textContent);
+    // V1.1.0 在知识库表增加共享范围类型和对应查询索引。这里对旧版静态数据快照
+    // 做幂等补齐，使页面展示与 schema.sql 保持一致，同时避免重复生成字段或约束。
+    const KNOWLEDGE_BASE_TABLE=DATA.tables.find(table=>table.name==='knowledge_base');
+    if(KNOWLEDGE_BASE_TABLE){
+      KNOWLEDGE_BASE_TABLE.description='保存 TENANT 同租户共享或 SYSTEM 全局共享知识库的 Scope、Profile 绑定、RAGFlow Dataset 映射和知识库 Revision。';
+      const securityScope=KNOWLEDGE_BASE_TABLE.fields.find(field=>field.name==='security_scope_id');
+      if(securityScope) securityScope.description='租户共享范围或系统全局范围的服务端派生 Hash';
+      if(!KNOWLEDGE_BASE_TABLE.fields.some(field=>field.name==='scope_type')){
+        const securityScopeIndex=KNOWLEDGE_BASE_TABLE.fields.findIndex(field=>field.name==='security_scope_id');
+        KNOWLEDGE_BASE_TABLE.fields.splice(securityScopeIndex+1,0,{
+          name:'scope_type',type:'VARCHAR(16)',required:'是',default:'—',
+          description:'知识库共享类型，只允许 TENANT 或 SYSTEM',roles:['共享范围']
+        });
+      }
+      if(!KNOWLEDGE_BASE_TABLE.check_names.includes('chk_knowledge_base_scope_type')) KNOWLEDGE_BASE_TABLE.check_names.push('chk_knowledge_base_scope_type');
+      if(!KNOWLEDGE_BASE_TABLE.indexes.some(index=>index.name==='idx_knowledge_base_type_scope_status')){
+        KNOWLEDGE_BASE_TABLE.indexes.push({name:'idx_knowledge_base_type_scope_status',unique:false,definition:'(scope_type, security_scope_id, status)'});
+      }
+    }
+    if(EXAMPLES.knowledge_base&&!EXAMPLES.knowledge_base.scope_type) EXAMPLES.knowledge_base.scope_type='TENANT';
+    const CITATION_TABLE=DATA.tables.find(table=>table.name==='citation_record');
+    if(CITATION_TABLE){
+      if(!CITATION_TABLE.fields.some(field=>field.name==='resource_scope_id')){
+        const principalScopeIndex=CITATION_TABLE.fields.findIndex(field=>field.name==='security_scope_id');
+        CITATION_TABLE.fields.splice(principalScopeIndex+1,0,{
+          name:'resource_scope_id',type:'CHAR(64)',required:'是',default:'—',
+          description:'引用来源知识库和文档所属的租户或系统资源 Scope',roles:['外键','资源范围']
+        });
+      }
+      if(!CITATION_TABLE.check_names.includes('chk_citation_resource_scope')) CITATION_TABLE.check_names.push('chk_citation_resource_scope');
+      for(const foreignKey of CITATION_TABLE.foreign_keys){
+        if(['fk_citation_knowledge_base','fk_citation_document'].includes(foreignKey.name)) foreignKey.columns=['resource_scope_id',foreignKey.columns[1]];
+      }
+      const citationIndex=CITATION_TABLE.indexes.find(index=>index.name==='idx_citation_scope_document');
+      if(citationIndex){
+        citationIndex.name='idx_citation_resource_document';
+        citationIndex.definition='(resource_scope_id, document_id, created_at)';
+      }
+      for(const relation of DATA.relations){
+        if(['fk_citation_knowledge_base','fk_citation_document'].includes(relation.name)) relation.columns=['resource_scope_id',relation.columns[1]];
+      }
+    }
+    if(EXAMPLES.citation_record&&!EXAMPLES.citation_record.resource_scope_id) EXAMPLES.citation_record.resource_scope_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const esc=(value)=>String(value??'').replace(/[&<>"']/g,(char)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const list=(items,format=(x)=>x)=>items.length?`<ul>${items.map(item=>`<li>${format(item)}</li>`).join('')}</ul>`:'<span class="empty">无</span>';
+    const STATUS_GUIDANCE={
+      knowledge_base:'表示知识库从创建到删除的生命周期。允许值为 CREATING、READY、CREATE_FAILED、DELETING、DELETE_FAILED、DELETED；只有 READY 状态通常可承接正常文档和查询操作。',
+      document_record:'表示逻辑文档当前对外状态。状态会沿 RECEIVED、UPLOADING、UPLOADED、QUEUED、PARSING、INDEXING、READY 推进，也可能进入 FAILED、RETRYING 或删除相关状态；调用方进度展示和是否允许检索都依赖它。',
+      document_version:'表示单个物理版本的处理结果。候选版本从 PENDING 开始，经过 UPLOADING、PARSING、INDEXING，成功后成为 ACTIVE；被新版本替换后成为 RETIRED，失败则为 FAILED。',
+      ingestion_job:'表示异步任务的调度状态。Worker 根据 PENDING、RUNNING、RETRY_WAIT、SUCCEEDED、FAILED、CANCEL_REQUESTED、CANCELLED 决定认领、重试、结束或取消处理。',
+      query_record:'表示一次查询请求的执行阶段。允许值为 ACCEPTED、RUNNING、COMPLETED、FAILED、CANCELLED，适合用于轮询查询状态和审计请求是否完整结束。'
+    };
+    const SPECIAL_GUIDANCE={
+      'config_profile.profile_type':'决定 config_json 的配置结构及消费方，可区分 PARSER、CHUNK、EMBEDDING、RETRIEVAL、RERANK、PROMPT、MODEL、CACHE 等配置类别。',
+      'config_profile.version':'与 profile_type、name 一起确定不可变的配置版本；行为发生变化时应新增版本，而不是覆盖已被历史记录引用的版本。',
+      'config_profile.config_json':'保存该 Profile 真正生效的结构化参数。应用层应按 profile_type 校验 JSON 结构，数据库只负责保存 JSONB，不自动理解其中每个配置项。',
+      'config_profile.checksum_sha256':'对规范化配置内容计算摘要，用于部署或启动检查时发现“同一名称与版本、内容却不同”的配置漂移。',
+      'config_profile.enabled':'控制该 Profile 是否还能被新请求选择；禁用通常不应破坏已经引用它的历史记录。',
+      'knowledge_base.scope_type':'定义知识库的共享范围。TENANT 表示同一租户下全部用户当前可访问，SYSTEM 表示所有租户均可访问；未来成员 ACL 会在应用访问策略中进一步收窄 TENANT 可读范围。',
+      'knowledge_base.ragflow_dataset_id':'保存自研知识库与 RAGFlow Dataset 的一对一映射，是向上游发起文档、解析和检索请求时使用的引擎侧标识。',
+      'knowledge_base.revision':'知识库内容修订号。文档内容或可检索状态变化时递增，并参与缓存隔离，避免旧 Revision 的答案命中新内容。',
+      'document_record.ragflow_document_id':'指向当前活动版本对应的 RAGFlow 文档；版本切换成功后才更新，确保在线检索不会提前引用未完成的新版本。',
+      'document_record.active_version_id':'指向当前可对外使用的 document_version。更新文档时旧值继续生效，只有候选版本解析和索引全部成功后才原子切换。',
+      'document_record.active_version_number':'当前活动版本的人类可读序号，与 active_version_id 一起形成稳定文档入口的版本快照。',
+      'document_record.document_revision':'逻辑文档修订号，用于并发更新和缓存边界；活动版本或影响检索的内容变化时应递增。',
+      'document_record.engine_progress_message':'保存从 RAGFlow 归一化后的当前阶段摘要，适合前端展示处理进度；不应存放上游堆栈、凭据或未经脱敏的内部错误。',
+      'document_version.version_number':'同一逻辑文档内单调递增的版本序号，用于展示版本历史并防止重复创建相同版本。',
+      'document_version.requested_mode':'记录调用方请求的更新模式，用于审计原始意图；即使系统发生降级，也不应覆盖这个值。',
+      'document_version.effective_mode':'记录系统校验能力和运行条件后实际采用的更新模式，可与 requested_mode 不同，用于解释最终执行路径。',
+      'document_version.activated_at':'记录该版本正式成为活动版本的时间；未激活的候选版本保持 NULL。',
+      'document_version.retired_at':'记录活动版本被后续版本替换的时间；当前活动版本和从未激活的失败版本通常为 NULL。',
+      'document_index_node.node_type':'区分 PARENT、SECTION、SUMMARY 等侧车节点层级，决定召回后如何导航到更细粒度的原始 Chunk。',
+      'document_index_node.content':'保存用于侧车召回的标题、段落聚合或摘要文本；它不是最终引用原文，命中后仍需通过 source_chunk_ids_json 回读并验证 RAGFlow Chunk。',
+      'document_index_node.source_chunk_ids_json':'保存生成该节点所依据的 RAGFlow Chunk ID 数组，是从侧车索引返回可验证原文的溯源链路。',
+      'document_index_node.embedding_bytes':'保存节点向量的二进制表示，供自研侧车相似度检索使用；序列化格式必须与 Embedding Profile 和 embedding_dimension 一致。',
+      'document_index_node.embedding_dimension':'记录向量维度，用于加载时校验二进制长度和模型兼容性，防止不同 Embedding 模型的向量被混用。',
+      'document_index_node.index_version':'标识侧车索引生成算法或数据格式版本，重建索引时用于区分新旧产物。',
+      'document_entity.canonical_name':'实体对外展示的规范名称，保留可读形式；实体合并和精确匹配通常结合 normalized_name 完成。',
+      'document_entity.normalized_name':'实体名称经大小写、空白或其他确定性规则归一化后的值，用于去重、聚合和关系关联。',
+      'document_entity.aliases_json':'保存同一实体在文档中出现的别名数组，供查询扩展和展示使用；应用层应保证数组元素为可控字符串。',
+      'document_entity.source_chunk_ids_json':'保存实体出现位置对应的 Chunk ID，召回实体后可据此回读证据文本。',
+      'document_entity.mention_count':'实体在当前文档索引版本中的确定性出现次数，可用于排序或过滤，不等同于跨知识库的全局热度。',
+      'entity_relation.predicate':'主体与客体之间的规范化关系名称；应使用稳定、可解释的谓词，避免把整句原文直接写入。',
+      'entity_relation.source_chunk_ids_json':'保存能够证明该关系的 Chunk ID，关系被用于导航或回答时仍需回读这些原文证据。',
+      'entity_relation.confidence':'关系抽取置信度，范围为 0～1，可用于阈值过滤；它不替代引用验证，也不表示事实绝对正确。',
+      'ingestion_job.job_type':'决定 Worker 执行的动作，可表示上传、解析、重解析、文档更新、删除知识库/文档或清理任务。',
+      'ingestion_job.attempt':'当前已经开始的尝试次数，Worker 每次认领并实际执行时按调度规则更新。',
+      'ingestion_job.max_attempts':'允许的最大尝试次数；达到上限后任务应进入稳定失败状态，而不是无限重试。',
+      'ingestion_job.payload_json':'保存创建任务时冻结的输入参数，便于 Worker 异步执行和故障重放；内容应脱敏且带可识别的结构版本。',
+      'ingestion_job.result_json':'保存成功结果或可安全审计的统计信息，例如 Chunk 数；不应把大段原文或敏感响应完整复制进来。',
+      'ingestion_job.next_retry_at':'任务处于 RETRY_WAIT 时的下次可认领时间，用于实现退避并避免 Worker 立即重复失败。',
+      'ingestion_job.locked_by':'当前持有任务租约的 Worker 标识，用于排查任务归属，不应使用主机凭据或敏感实例信息。',
+      'ingestion_job.locked_until':'Worker 租约到期时间；过期后其他 Worker 才能安全地重新认领未完成任务。',
+      'idempotency_record.idempotency_key':'调用方为一次写操作提供的稳定幂等键，与 Scope、方法和路径共同确定同一操作。重复请求只有在请求指纹一致时才能重放已有响应。',
+      'idempotency_record.request_sha256':'对规范化请求内容计算摘要，用于拒绝“复用同一幂等键但请求内容不同”的冲突请求。',
+      'idempotency_record.processing_status':'标识幂等请求仍在处理、已经完成或稳定失败，重复调用方据此等待、重放响应或接收失败。',
+      'idempotency_record.response_json':'保存允许安全重放的响应快照；写入前应去除临时凭据、内部调试信息和不应长期保存的数据。',
+      'idempotency_record.expires_at':'幂等窗口结束时间，必须晚于 created_at；到期记录可由清理任务删除。',
+      'query_record.outcome':'记录最终业务结果 success、no_evidence、refused 或 cancelled，与技术执行状态分开，便于评估“正常完成但无证据”等情况。',
+      'query_record.query_redacted':'保存脱敏后的原始问题，用于审计和离线评估；不得写入未经授权的原始敏感内容。',
+      'query_record.effective_query_redacted':'保存 Rewrite、翻译或规范化后真正用于检索的问题，便于解释召回结果，同时仍须经过脱敏。',
+      'query_record.knowledge_base_ids_json':'冻结本次查询实际使用的知识库 ID 数组，便于审计多知识库检索范围和按知识库反查请求。',
+      'query_record.cache_status':'记录本次请求是绕过缓存、未命中、精确命中、语义命中还是写缓存失败，用于分析性能和缓存正确性。',
+      'query_record.candidate_count':'记录融合或初筛后候选数量，用于诊断召回阶段；它不等同于最终送入模型的上下文数量。',
+      'query_record.context_count':'记录完成过滤、重排和预算裁剪后实际送入模型的上下文数量。',
+      'query_record.answer_text':'保存最终对外回答，用于状态查询、审计和反馈关联；保留期限应受 expires_at 与数据治理策略控制。',
+      'query_record.timings_json':'保存缓存、检索、重排、生成等阶段耗时，字段结构由应用版本控制，主要用于性能诊断。',
+      'query_record.warnings_json':'保存降级、跳过某阶段等非致命警告数组；请求仍可成功，但客户端可以据此提示结果质量风险。',
+      'query_record.expires_at':'查询审计记录的计划清理时间；为空表示当前保留策略没有设置单条到期时间。',
+      'citation_record.ordinal':'引用在当前回答中的零基顺序，用于保持引用列表与回答出现次序一致。',
+      'citation_record.label':'回答文本使用的稳定标签，例如 C1；同一 Scope 和请求内必须唯一。',
+      'citation_record.engine_chunk_id':'保存最终证据对应的 RAGFlow 或搜索引擎 Chunk ID，用于回读和再次验证来源。',
+      'citation_record.heading_path_json':'保存引用所在的标题层级数组，帮助用户理解片段在文档中的结构位置。',
+      'citation_record.resource_scope_id':'保存证据知识库和文档的资源 Scope。请求主体仍由 security_scope_id 标识；来源可以属于当前租户共享 Scope 或 SYSTEM 全局 Scope，因此引用外键必须使用本字段关联资源。',
+      'citation_record.positions_json':'保存页内坐标或结构化位置数组，用于前端高亮原文；坐标格式必须由应用版本统一定义。',
+      'citation_record.quote_text':'保存经过文档边界验证的引用摘录，回答中的事实应能由该文本直接支持。',
+      'citation_record.retrieval_score':'记录召回或融合阶段分数，适合诊断检索排序；不同 Profile 或算法的分数不宜直接横向比较。',
+      'citation_record.rerank_score':'记录外部重排模型分数，用于解释最终排序；为空表示本次未执行或未返回重排分数。',
+      'citation_record.verification_status':'记录引用是否通过来源和边界验证：VALID 可对外使用，INVALID 应剔除，UNVERIFIED 表示尚未完成验证。',
+      'feedback_record.rating':'用户对回答的方向性评分，只允许 1 或 -1；为空时可以仅使用 feedback_type 表达反馈。',
+      'feedback_record.feedback_type':'结构化反馈类别，如 helpful、not_helpful、answer_incorrect、citation_incorrect、should_answer、should_refuse 或 other，便于离线聚合评估。',
+      'feedback_record.corrected_answer':'用户提供的参考纠正答案，可用于人工复核或离线评估，但不应未经审核直接覆盖在线答案或索引。'
+    };
+    const fieldGuidance=(table,field)=>{
+      const key=`${table.name}.${field.name}`;
+      const summary=field.description.replace(/[。；]$/,'');
+      if(STATUS_GUIDANCE[table.name]&&field.name==='status') return `${summary}。${STATUS_GUIDANCE[table.name]}`;
+      if(SPECIAL_GUIDANCE[key]) return `${summary}。${SPECIAL_GUIDANCE[key]}`;
+      if(field.name==='security_scope_id') return `${summary}。它是服务端派生的 64 位小写十六进制 Hash，可表示调用主体、租户资源或系统资源范围；所有带 Scope 的联合查询和外键都必须同时携带它，防止不同资源范围发生越权关联。`;
+      if(field.name==='row_version') return `${summary}。更新时应在 WHERE 条件中比较旧值并递增；影响行数为 0 表示记录已被其他事务修改，需要重新读取或返回并发冲突。`;
+      if(field.name==='external_id') return `${summary}。适合保存调用方可重复使用的业务标识，用于幂等创建或按外部系统标识查找；它不能替代数据库 UUID 主键。`;
+      if(field.name.endsWith('_profile_ref')) return `${summary}。值通常采用 name@version 形式，保证历史请求能够复现当时配置；它是应用层逻辑引用，不是数据库外键。`;
+      if(field.name.endsWith('_sha256')) return `${summary}。应用层写入前应基于规范化内容计算 64 位小写十六进制 SHA-256，用于完整性校验或精确去重，而不是保存明文内容。`;
+      if(field.name==='metadata_json') return `${summary}。用于承载非核心扩展属性；应用层应限制键名、数据大小和敏感信息，并通过版本化契约解释 JSON 结构。`;
+      if(field.name.endsWith('_json')) return `${summary}。数据库以 JSONB 保存结构，但具体键、数组元素和版本兼容性仍由应用层校验。`;
+      if(field.name==='filename') return `${summary}。用于界面展示和下载提示，不能直接作为服务器文件路径。`;
+      if(field.name==='safe_filename') return `${summary}。由服务端清理路径分隔符和危险字符后生成，可用于受控存储名称，但仍不能绕过目录边界校验。`;
+      if(field.name==='mime_type') return `${summary}。应由服务端结合文件内容识别，不能只信任上传请求中的扩展名或 Content-Type。`;
+      if(field.name==='file_size_bytes') return `${summary}。用于上传限制、配额和完整性检查，必须是非负值并与实际接收字节数一致。`;
+      if(field.name==='progress') return `${summary}。取值范围为 0～1，供 API 和前端统一显示；状态完成时通常为 1，失败时应结合错误字段解释停留阶段。`;
+      if(field.name==='error_code'||field.name==='last_error_code') return `${summary}。保存稳定、可供程序判断的脱敏错误码；不要直接写入异常堆栈或第三方原始响应。`;
+      if(field.name==='error_message'||field.name==='last_error_message') return `${summary}。用于运维和用户提示的脱敏摘要，详细堆栈应进入受控日志系统而不是业务表。`;
+      if(field.name==='created_at') return `${summary}。由数据库创建记录时生成，主要用于审计和稳定排序，业务更新不应覆盖它。`;
+      if(field.name==='updated_at') return `${summary}。由更新时间触发器维护，反映记录最近一次持久化变更，可用于增量同步和乐观刷新。`;
+      if(field.name.endsWith('_at')) return `${summary}。接口和持久化统一按 UTC 语义处理，展示时再转换到用户时区；为空通常表示对应生命周期事件尚未发生。`;
+      if(field.name.endsWith('_count')) return `${summary}。它是为查询和诊断保存的汇总值，写入时必须与当前有效版本或本次请求的实际结果保持一致。`;
+      if(field.name.endsWith('_tokens')) return `${summary}。用于成本、预算和性能分析；为空表示上游模型没有返回该统计，不应自动当作 0。`;
+      if(table.primary_keys.includes(field.name)) return `${summary}。它参与该表主键，用于稳定定位记录；创建后不应被业务更新。`;
+      if(field.name.endsWith('_id')) return `${summary}。它用于关联对应资源，查询和写入时还应同时遵守本表的 security_scope_id 隔离条件。`;
+      return `${summary}。该值由「${table.title}」相关的创建、更新或查询流程读写；调用方需要同时遵守字段类型、空值规则和表级约束。`;
+    };
+    const fieldDatabaseBehavior=(table,field)=>{
+      const rules=[];
+      if(field.required==='是') rules.push(field.default==='—'?'数据库要求 NOT NULL，插入时需要显式提供':'数据库要求 NOT NULL，未提供时使用默认值 '+field.default);
+      else rules.push(field.default==='NULL'?'允许为 NULL，NULL 表示该信息尚无值或不适用':'允许为 NULL，默认值为 '+field.default);
+      if(table.primary_keys.includes(field.name)) rules.push('属于主键 '+table.primary_keys.join(', '));
+      table.unique_rules.filter(rule=>rule.includes(field.name)).forEach(rule=>rules.push('参与唯一规则 '+rule.join(', ')));
+      table.foreign_keys.filter(relation=>relation.columns.includes(field.name)).forEach(relation=>{
+        const position=relation.columns.indexOf(field.name);
+        rules.push(`外键指向 ${relation.target}.${relation.target_columns[position]}，删除策略 ${relation.on_delete}`);
+      });
+      const token=new RegExp(`(^|[^a-z0-9_])${field.name}([^a-z0-9_]|$)`,'i');
+      const indexes=table.indexes.filter(index=>token.test(index.definition)).map(index=>index.name);
+      if(indexes.length) rules.push('被显式索引 '+indexes.join(', ')+' 覆盖');
+      if(field.name==='updated_at'&&table.triggers.length) rules.push('由触发器 '+table.triggers.join(', ')+' 自动维护');
+      return `SQL 类型为 ${field.type}。${rules.join('；')}。`;
+    };
+    const nav=document.getElementById('nav');
+    const tables=document.getElementById('tables');
+    nav.innerHTML=DATA.tables.map((table,index)=>`<a href="#table-${esc(table.name)}">${String(index+1).padStart(2,'0')} · <code>${esc(table.name)}</code></a>`).join('')+'<a href="#alembic-version">13 · <code>alembic_version</code></a>';
+    tables.innerHTML=DATA.tables.map((table,index)=>{
+      const fields=table.fields.map(field=>{
+        const detailId=`field-detail-${table.name}-${field.name}`;
+        const guidance=fieldGuidance(table,field);
+        const databaseBehavior=fieldDatabaseBehavior(table,field);
+        const searchText=[field.name,field.type,field.description,guidance,databaseBehavior,...field.roles].join(' ').toLowerCase();
+        return `<tr class="field-row" data-open="false" data-search="${esc(searchText)}" title="点击查看字段详细说明"><td><button class="field-toggle" type="button" aria-expanded="false" aria-controls="${esc(detailId)}"><span class="field-caret" aria-hidden="true">›</span><code>${esc(field.name)}</code></button></td><td><code>${esc(field.type)}</code></td><td class="${field.required==='是'?'yes':'no'}">${esc(field.required)}</td><td><code>${esc(field.default)}</code></td><td>${field.roles.map(role=>`<span class="role">${esc(role)}</span>`).join('')||'<span class="empty">普通字段</span>'}</td><td>${esc(field.description)}</td></tr><tr class="field-detail-row" id="${esc(detailId)}" hidden><td colspan="6"><div class="field-detail"><section><h4>业务含义与主要用途</h4><p>${esc(guidance)}</p></section><section><h4>数据库行为与约束</h4><p>${esc(databaseBehavior)}</p></section></div></td></tr>`;
+      }).join('');
+      const fk=(relation)=>`<code>${esc(relation.columns.join(', '))}</code> → <code>${esc(relation.target)}(${esc(relation.target_columns.join(', '))})</code> · 删除策略 ${esc(relation.on_delete)}`;
+      const idx=(item)=>`<code>${esc(item.name)}</code>${item.unique?' · 唯一索引':''} · ${esc(item.definition)}`;
+      return `<details class="table-card" id="table-${esc(table.name)}" data-table-search="${esc([table.name,table.title,table.description,...table.fields.flatMap(field=>[field.name,field.description])].join(' ').toLowerCase())}" ${index===0?'open':''}><summary><div class="titleline"><span class="table-no">${String(index+1).padStart(2,'0')}</span><div><h3><code>${esc(table.name)}</code> · ${esc(table.title)}</h3><p>${esc(table.description.slice(0,110))}</p></div></div><span class="count">${table.fields.length} 个字段</span></summary><div class="body"><p class="responsibility">${esc(table.description)}</p><div class="field-wrap"><table><thead><tr><th>字段</th><th>SQL 类型</th><th>必填</th><th>默认值</th><th>角色</th><th>含义与用途</th></tr></thead><tbody>${fields}</tbody></table></div><div class="rules"><div class="rule"><b>主键与唯一规则</b>${list([table.primary_keys.length?`主键：<code>${esc(table.primary_keys.join(', '))}</code>`:'',...table.unique_rules.map(rule=>`唯一：<code>${esc(rule.join(', '))}</code>`)].filter(Boolean),x=>x)}</div><div class="rule"><b>外键关系</b>${list(table.foreign_keys,fk)}</div><div class="rule"><b>显式索引</b>${list(table.indexes,idx)}</div><div class="rule"><b>检查约束与触发器</b>${list([...table.check_names.map(name=>`检查约束：<code>${esc(name)}</code>`),...table.triggers.map(name=>`更新时间触发器：<code>${esc(name)}</code>`)],x=>x)}</div></div></div></details>`;
+    }).join('');
+    DATA.tables.forEach((table)=>{
+      const card=document.getElementById(`table-${table.name}`);
+      card.dataset.tableSearch+=' '+table.fields.flatMap(field=>[fieldGuidance(table,field),fieldDatabaseBehavior(table,field)]).join(' ').toLowerCase();
+      const body=card.querySelector('.body');
+      body.querySelector('.field-wrap').insertAdjacentHTML('beforebegin','<p class="field-hint"><b>查看详细说明：</b>点击任意字段行展开；聚焦字段名后也可按 Enter 或空格键操作。</p>');
+      const example=EXAMPLES[table.name];
+      if(!example) return;
+      body.insertAdjacentHTML('beforeend',`<details class="example-record"><summary>示例记录（虚构数据）</summary><pre><code>${esc(JSON.stringify(example,null,2))}</code></pre></details>`);
+    });
+    tables.addEventListener('click',(event)=>{
+      const row=event.target.closest('.field-row');
+      if(!row||!tables.contains(row)) return;
+      const toggle=row.querySelector('.field-toggle');
+      const detail=document.getElementById(toggle.getAttribute('aria-controls'));
+      const open=toggle.getAttribute('aria-expanded')!=='true';
+      toggle.setAttribute('aria-expanded',String(open));
+      row.dataset.open=String(open);
+      detail.hidden=!open;
+    });
+    const search=document.getElementById('search');
+    search.addEventListener('input',()=>{
+      const term=search.value.trim().toLowerCase();
+      document.querySelectorAll('.table-card').forEach(card=>{
+        const matches=!term||card.dataset.tableSearch.includes(term);
+        card.classList.toggle('hidden',!matches);
+        if(term&&matches) card.open=true;
+      });
+    });
+    document.getElementById('openAll').onclick=()=>document.querySelectorAll('.table-card').forEach(card=>card.open=true);
+    document.getElementById('closeAll').onclick=()=>document.querySelectorAll('.table-card').forEach(card=>card.open=false);
+  </script>
+</body>
+</html>

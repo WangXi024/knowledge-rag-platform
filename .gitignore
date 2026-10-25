@@ -1,0 +1,23 @@
+# 本机凭据、数据和生成物不进入公开仓库。
+**/.git/
+**/.openai/
+**/node_modules/
+**/.venv/
+**/.wrangler/
+**/.next/
+**/.vinext/
+**/dist/
+**/.DS_Store
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+**/*.pem
+**/*.key
+**/*.sqlite*
+**/*.tsbuildinfo
+**/.coverage

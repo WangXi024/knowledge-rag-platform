@@ -1,0 +1,298 @@
+# 服务运行配置结构。含 *_env 的值是“环境变量名称”，真实密码/密钥不得写入此文件。
+app:
+  name: rag-service
+  environment: development
+  api_version: v1
+  host: 0.0.0.0
+  port: 8080
+  public_base_url: http://localhost:8080
+  max_request_body_bytes: 104857600
+  max_query_chars: 8000
+  default_language: zh-CN
+
+identity:
+  # 临时联调模式：业务接口接收租户和用户两个 ID，不提供身份鉴别，生产环境禁止使用。
+  mode: direct_user
+  tenant_header_name: X-Tenant-ID
+  user_header_name: X-User-ID
+  max_tenant_id_length: 128
+  max_user_id_length: 128
+
+database:
+  dsn_env: APP_DATABASE_DSN
+  dialect: postgresql
+  driver: psycopg3
+  schema: rag_app
+  pool_size: 20
+  max_overflow: 20
+  pool_recycle_seconds: 1800
+  connect_timeout_seconds: 5
+  statement_timeout_seconds: 15
+
+redis:
+  url_env: APP_REDIS_URL
+  # APP_REDIS_URL 已固定指向统一 Redis Stack 的 DB 2；这里不再保留容易误导的旧
+  # celery_db/control_db 字段。Key 前缀会同时作用于队列、未确认消息和 Kombu
+  # 内部状态，真正使用哪个逻辑 DB 只由连接 URL 的 /2 决定。
+  celery_key_prefix: "rag:celery:"
+  ingestion_queue_name: rag-ingestion
+  maintenance_queue_name: rag-maintenance
+  # 必须大于可能出现的长文档任务执行时间，避免消息仍在执行时被 Redis Broker
+  # 重新投递；真正的崩溃恢复仍由 PostgreSQL Job 租约完成。
+  broker_visibility_timeout_seconds: 14400
+  broker_health_check_interval_seconds: 30
+  socket_connect_timeout_seconds: 2
+  socket_timeout_seconds: 2
+
+ragflow:
+  base_url_env: RAGFLOW_BASE_URL
+  api_key_env: RAGFLOW_API_KEY
+  embedding_model_env: RAGFLOW_EMBEDDING_MODEL
+  vision_model_env: RAGFLOW_VISION_MODEL
+  vision_runtime_model_env: RAGFLOW_VISION_RUNTIME_MODEL
+  embedding_dimension_env: EMBEDDING_DIMENSION
+  contract_version: v0.26.4
+  connect_timeout_seconds: 3
+  read_timeout_seconds: 30
+  upload_timeout_seconds: 300
+  retrieval_timeout_seconds: 8
+  max_connections: 100
+  max_keepalive_connections: 20
+  retries:
+    max_attempts: 2
+    base_delay_ms: 250
+    max_delay_ms: 1000
+    retry_http_statuses: [429, 502, 503, 504]
+
+jobs:
+  default_max_attempts: 2
+  lease_seconds: 120
+  # 每五秒投递一次“尝试认领 Job”的短消息；消息十五秒后失效，防止长解析期间
+  # 累积的旧轮询在 Worker 恢复后继续空转。Job 本体仍安全保存在 PostgreSQL。
+  recovery_scan_interval_seconds: 5
+  dispatch_message_expires_seconds: 15
+  # 清理任务每十五分钟调度一次，十四分钟后仍未执行就让它失效，等待下一轮。
+  cleanup_message_expires_seconds: 840
+  parse_poll_initial_seconds: 2
+  parse_poll_max_seconds: 15
+  parse_deadline_seconds: 1800
+  cleanup_batch_size: 200
+
+models:
+  llm:
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
+    model_env: LLM_MODEL
+    rewrite_model_env: REWRITE_MODEL
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 120
+    first_token_timeout_seconds: 20
+    max_concurrency: 4
+    # 这三个字段由通用模型 Bootstrap 自动探测并写入 Git 忽略环境。标准
+    # OpenAI-compatible 模型使用 false/max_tokens/{}；协议存在有限差异时才写覆盖值。
+    omit_sampling_parameters_env: LLM_OMIT_SAMPLING_PARAMETERS
+    max_output_tokens_field_env: LLM_MAX_OUTPUT_TOKENS_FIELD
+    extra_body_json_env: LLM_EXTRA_BODY_JSON
+    retries:
+      max_attempts: 2
+      base_delay_ms: 250
+  embedding:
+    base_url_env: EMBEDDING_BASE_URL
+    api_key_env: EMBEDDING_API_KEY
+    model_env: EMBEDDING_MODEL
+    dimension_env: EMBEDDING_DIMENSION
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 60
+    max_concurrency: 4
+    batch_size: 32
+    retries:
+      max_attempts: 2
+      base_delay_ms: 250
+  vision:
+    # 图片由 RAGFlow 调用同一个模型；此处用于启动前真实视觉探测和健康检查。
+    base_url_env: VISION_BASE_URL
+    api_key_env: VISION_API_KEY
+    model_env: VISION_MODEL
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 120
+    retries:
+      max_attempts: 2
+  media_vision:
+    # 视频由 Worker 抽帧后调用独立的通用视觉模型。该模型不注册到 RAGFlow，避免
+    # 视频场景理解模型替换普通图片和文档 OCR 使用的专用模型。
+    base_url_env: MEDIA_VISION_BASE_URL
+    api_key_env: MEDIA_VISION_API_KEY
+    model_env: MEDIA_VISION_MODEL
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 180
+    retries:
+      max_attempts: 2
+  media:
+    # 音频/视频由 Worker 先转换为时间戳 Markdown，再进入 RAGFlow naive Parser。
+    # ASR 必须实现本项目约定的 Chat Completions input_audio 协议；供应商名称不参与路由。
+    enabled_env: MEDIA_PROCESSING_ENABLED
+    asr_base_url_env: ASR_BASE_URL
+    asr_api_key_env: ASR_API_KEY
+    asr_model_env: ASR_MODEL
+    ffmpeg_binary: ffmpeg
+    ffprobe_binary: ffprobe
+    segment_seconds: 60
+    segment_overlap_seconds: 2
+    # 短视频按此基础间隔抽帧；长视频会在 max_video_frames 内均匀放宽间隔。
+    frame_interval_seconds: 10
+    max_video_frames: 20
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 180
+    process_timeout_seconds: 1800
+    max_concurrency: 2
+    retries:
+      max_attempts: 2
+  rerank:
+    enabled_env: RERANK_ENABLED
+    base_url_env: RERANK_BASE_URL
+    api_key_env: RERANK_API_KEY
+    model_env: RERANK_MODEL
+    timeout_seconds: 8
+    max_attempts: 2
+    # 限制单进程同时发往外部 Cross-Encoder 的请求，防止高并发问答放大云端压力。
+    max_concurrency: 4
+    failure_policy: use_unreranked_candidates_with_warning
+
+uploads:
+  staging_backend: local_volume
+  staging_dir: /var/lib/rag/uploads
+  uploading_suffix: .uploading
+  ready_suffix: .ready
+  retain_failed_seconds: 86400
+  cleanup_interval_seconds: 900
+  max_staging_bytes: 10737418240
+  max_file_bytes: 104857600
+  allowed_extensions:
+    - .pdf
+    - .doc
+    - .docx
+    - .ppt
+    - .pptx
+    - .xls
+    - .xlsx
+    - .txt
+    - .md
+    - .html
+    - .htm
+    - .csv
+    - .json
+    - .jsonl
+    - .ldjson
+    - .png
+    - .jpg
+    - .jpeg
+    - .webp
+    - .mp3
+    - .wav
+    - .m4a
+    - .aac
+    - .flac
+    - .ogg
+    - .mp4
+    - .mov
+    - .mkv
+    - .webm
+    - .avi
+  reject_double_extensions: true
+  url_ingestion_enabled: false
+
+profiles:
+  seed_dir: /app/configs
+  seed_files:
+    - parser_profiles.example.yaml
+    - retrieval_profiles.example.yaml
+    - model_profiles.example.yaml
+    - prompts.example.yaml
+  import_on_bootstrap: true
+  runtime_source: database
+  conflict_policy: fail
+  required_refs:
+    - deepdoc-default@1
+    - json-default@1
+    - picture-default@1
+    - media-default@1
+    - general-512@1
+    - general-256@2
+    - prose-384@1
+    - table-192@1
+    - visual-192@1
+    - media-320@1
+    - embedding-openai-compatible@3
+    - hybrid-default@1
+    - hybrid-default@2
+    - hybrid-adaptive@3
+    - hybrid-multigranular@4
+    - hybrid-structure-aware@5
+    - hybrid-structure-aware@6
+    - retrieval-query-en@1
+    - retrieval-query-bilingual@1
+    - rag-answer-localized@1
+    - citation-repair-localized@1
+    - answer-openai-compatible@4
+    - rewrite-openai-compatible@4
+    - rerank-compatible@2
+
+answers:
+  request_deadline_seconds: 150
+  sse_heartbeat_seconds: 15
+  max_history_messages: 12
+  max_history_chars: 20000
+  retry_generation_when_missing_citations: true
+  max_citation_repair_attempts: 1
+
+cache:
+  # 第一期必须实现；开发与验收环境开启，生产仍可通过配置独立关闭。
+  exact_enabled: true
+  semantic_enabled: true
+  url_env: CACHE_REDIS_URL
+  key_prefix: rag-cache
+  ttl_seconds: 3600
+  max_answer_bytes: 262144
+  bypass_on_error: true
+  semantic:
+    # 不同模型或修订不能写入同一语义缓存索引。即使维度相同，也必须升级索引
+    # 世代，防止跨模型的相似度分布失真。
+    key_prefix: "rag-cache:semantic:v2:"
+    index_name: rag_semantic_cache_v2
+    index_schema_version: 2
+    vector_field: embedding
+    vector_data_type: FLOAT32
+    embedding_model_env: EMBEDDING_MODEL
+    embedding_dimension_env: EMBEDDING_DIMENSION
+    distance_metric: cosine
+    algorithm: HNSW
+    hnsw_m: 16
+    hnsw_ef_construction: 200
+    top_k: 3
+    # 保守初始值，使用方必须用真实问题手动校准。
+    similarity_threshold: 0.95
+    require_same_knowledge_base_revisions: true
+    require_same_retrieval_profile: true
+    require_same_prompt_profile: true
+    require_same_model_profile: true
+    require_same_language: true
+    require_same_history_hash: true
+    require_same_security_scope: true
+    security_scope_tag: security_scope_id
+    revalidate_citations: true
+
+idempotency:
+  ttl_seconds: 86400
+  processing_wait_ms: 500
+
+observability:
+  service_name: rag-service
+  log_level: INFO
+  store_redacted_query: true
+  store_prompt: false
+  store_context: false
+  query_record_retention_days: 30
+  log_security_scope_hash: true
+  log_raw_identity_claims: false
+  # Full OpenTelemetry export, metrics backend and dashboards are deferred.
+  otel_enabled: false

@@ -1,0 +1,11 @@
+# 本机依赖、构建结果和私有环境文件不进入 Docker 构建上下文。
+node_modules
+dist
+.next
+.vinext
+.wrangler
+public/pdfjs
+.env*
+.git
+outputs
+work

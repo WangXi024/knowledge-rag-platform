@@ -1,0 +1,171 @@
+# 版本化解析 Profile：按文件族声明 RAGFlow 解析器、支持扩展名和 parser_config。
+schema_version: 1
+profiles:
+  - ref: deepdoc-default@1
+    enabled: true
+    description: 默认复杂 PDF 解析；保留 OCR、版面和表格能力
+    supported_extensions: [.pdf]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        layout_recognize: DeepDOC
+        task_page_size: 12
+        html4excel: false
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+        parent_child:
+          use_parent_child: false
+          children_delimiter: "\n"
+
+  # 可选整页视觉解析：显式选择，不改变现有 PDF 默认值。
+  # Adapter 将模型占位符绑定到当前环境已注册的引用；位置精度为整页级。
+  - ref: vision-pdf@1
+    enabled: true
+    description: PDF 页面转图片后调用已注册的视觉模型；逐页识别，引用位置为整页范围
+    supported_extensions: [.pdf]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        layout_recognize: '${RAGFLOW_VISION_MODEL}'
+        task_page_size: 12
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+  # 独立引用避免选中用户已有的其他 MinerU 服务；先运行专用注册命令。
+  # 官方 MinerU 路径提交整份 PDF，不按页面任务裁剪。大页长确保只提交一次，
+  # 不沿用 DeepDOC 的 12 页切任务；官网单文档 200 页上限仍由官方校验。
+  - ref: mineru-cloud@1
+    enabled: true
+    description: MinerU 云端解析；文件发送至官网，需先配置适配服务并注册模型
+    supported_extensions: [.pdf]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        layout_recognize: mineru-cloud@mineru-cloud@MinerU
+        task_page_size: 1000000
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+  # 图片显式选择策略；原图作为 PDF 附件保留，不改变默认图片解析路由。
+  - ref: mineru-image@1
+    enabled: true
+    description: 图片无损包装为单页 PDF 后交给 MinerU 云端；仅支持静态 PNG/JPEG，最多 1600 万像素
+    supported_extensions: [.png, .jpg, .jpeg]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        layout_recognize: mineru-cloud@mineru-cloud@MinerU
+        task_page_size: 1000000
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+  - ref: mineru-default@1
+    enabled: true
+    description: 复杂公式、多栏和表格 PDF 的可选远程 MinerU 解析
+    supported_extensions: [.pdf]
+    prerequisites:
+      - MINERU_APISERVER
+      - MINERU_BACKEND
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        layout_recognize: MinerU
+        task_page_size: 12
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+        parent_child:
+          use_parent_child: false
+          children_delimiter: "\n"
+
+  - ref: office-default@1
+    enabled: true
+    description: Office、文本、Markdown 和 HTML 的内置解析基线
+    supported_extensions: [.doc, .docx, .ppt, .pptx, .xls, .xlsx, .txt, .md, .html, .htm, .csv]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        html4excel: true
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+  - ref: json-default@1
+    enabled: true
+    description: JSON、JSONL 和 LDJSON 使用 RAGFlow 内置结构化 JSON Parser
+    supported_extensions: [.json, .jsonl, .ldjson]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+  - ref: picture-default@1
+    enabled: true
+    description: 独立图片使用 RAGFlow Picture Parser；优先 OCR，短文本图片调用默认 Vision 模型生成描述
+    supported_extensions: [.png, .jpg, .jpeg, .webp]
+    ragflow:
+      chunk_method: picture
+      parser_config: {}
+
+  - ref: media-default@1
+    enabled: true
+    description: Worker 先用 ASR/视觉生成带时间戳 Markdown，再由 RAGFlow 执行通用切块
+    supported_extensions: [.mp3, .wav, .m4a, .aac, .flac, .ogg, .mp4, .mov, .mkv, .webm, .avi]
+    ragflow:
+      chunk_method: naive
+      parser_config:
+        html4excel: false
+        auto_keywords: 0
+        auto_questions: 0
+        raptor:
+          use_raptor: false
+        graphrag:
+          use_graphrag: false
+
+selection_rules:
+  - when:
+      extension: .pdf
+      document_hint: complex_formula_or_layout
+    use: mineru-default@1
+  - when:
+      extension: .pdf
+    use: deepdoc-default@1
+  - when:
+      extension_in: [.doc, .docx, .ppt, .pptx, .xls, .xlsx, .txt, .md, .html, .htm, .csv]
+    use: office-default@1
+  - when:
+      extension_in: [.json, .jsonl, .ldjson]
+    use: json-default@1
+  - when:
+      extension_in: [.png, .jpg, .jpeg, .webp]
+    use: picture-default@1
+  - when:
+      extension_in: [.mp3, .wav, .m4a, .aac, .flac, .ogg, .mp4, .mov, .mkv, .webm, .avi]
+    use: media-default@1

@@ -1,0 +1,72 @@
+# 供应商无关的版本化模型 Profile：只描述职责和业务预算，不保存端点或密钥。
+#
+# 实际 Base URL、API Key、模型名和 Embedding 维度全部从 Git 忽略环境读取。旧部署中
+# 已经导入数据库的厂商专属 Profile 行不会被删除，以保护已有知识库引用；新的种子和
+# 新建资源只使用本文件中的通用引用。
+schema_version: 1
+
+embedding_profiles:
+  - ref: embedding-openai-compatible@3
+    provider: openai_compatible
+    base_url_env: EMBEDDING_BASE_URL
+    api_key_env: EMBEDDING_API_KEY
+    model_env: EMBEDDING_MODEL
+    expected_dimension_env: EMBEDDING_DIMENSION
+    batch_size: 32
+    timeout_seconds: 60
+    note: active generic embedding profile; model or dimension changes require a new index generation
+
+rerank_profiles:
+  # 历史 @1 用于保持已落库 Profile 的校验值和旧知识库引用可恢复。它的名称是历史
+  # 标识，不会锁定实际模型；运行时仍从环境变量读取端点、密钥和模型名。
+  - ref: bge-reranker-v2-m3@1
+    provider: openai_compatible_rerank
+    enabled_env: RERANK_ENABLED
+    base_url_env: RERANK_BASE_URL
+    api_key_env: RERANK_API_KEY
+    model_env: RERANK_MODEL
+    timeout_seconds: 8
+    failure_policy: use_unreranked_candidates_with_warning
+    note: local development disables rerank and uses vector + BM25 + RRF
+
+  # @2 是供应商无关入口，供后续新增的检索 Profile 使用。只要服务遵守 POST /rerank
+  # 契约，就可以通过 Git 忽略环境变量更换模型，无需修改冻结的历史 @1。
+  - ref: rerank-compatible@2
+    # Rerank 不是 OpenAI 官方接口；这里约定供应商实现 POST /rerank，并返回逐文档分数。
+    provider: compatible_rerank
+    enabled_env: RERANK_ENABLED
+    base_url_env: RERANK_BASE_URL
+    api_key_env: RERANK_API_KEY
+    model_env: RERANK_MODEL
+    timeout_seconds: 8
+    failure_policy: use_unreranked_candidates_with_warning
+    note: active generic POST /rerank contract; disabled mode falls back to weighted RRF
+
+llm_profiles:
+  - ref: answer-openai-compatible@4
+    provider: openai_compatible
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
+    model_env: LLM_MODEL
+    temperature: 0.1
+    top_p: 0.8
+    max_output_tokens: 2048
+    connect_timeout_seconds: 5
+    first_token_timeout_seconds: 30
+    total_timeout_seconds: 150
+    supports_stream: true
+    fallback_ref: null
+
+  - ref: rewrite-openai-compatible@4
+    provider: openai_compatible
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
+    model_env: REWRITE_MODEL
+    temperature: 0.0
+    top_p: 0.8
+    max_output_tokens: 2048
+    max_attempts: 2
+    connect_timeout_seconds: 5
+    total_timeout_seconds: 120
+    supports_stream: false
+    failure_policy: use_original_query

@@ -1,0 +1,71 @@
+# RAGFlow 契约测试 Fixture 清单：固定外部响应样本、用途和所覆盖的适配器行为。
+version: 1
+ragflow_version: v0.26.4
+
+# Codex 必须为每个 operation 实现成功 Fixture 测试，并从 failure_cases 中选择
+# 至少一个最相关失败场景。transport_cases 对全部方法参数化执行。
+operations:
+  health:
+    success: ragflow-health-response.json
+    failure_cases: [business_error, missing_required_field]
+  create_dataset:
+    success: ragflow-dataset-create-response.json
+    failure_cases: [business_error, missing_required_field, conflict]
+  get_dataset:
+    success: ragflow-dataset-create-response.json
+    failure_cases: [not_found, missing_required_field]
+  update_dataset:
+    success: ragflow-dataset-create-response.json
+    failure_cases: [not_found, business_error]
+  delete_dataset:
+    success_shape: code_zero_nullable_data
+    failure_cases: [not_found, business_error]
+  upload_document:
+    success: ragflow-document-upload-response.json
+    failure_cases: [business_error, missing_required_field, ambiguous_upload_result]
+  get_document:
+    success: ragflow-document-response.json
+    failure_cases: [not_found, unknown_run]
+  list_documents:
+    success: ragflow-document-response.json
+    failure_cases: [business_error, invalid_pagination]
+  update_document:
+    success: ragflow-document-response.json
+    failure_cases: [not_found, business_error]
+  delete_document:
+    success_shape: code_zero_nullable_data
+    failure_cases: [not_found, business_error]
+  start_parse:
+    success_shape: code_zero_nullable_data
+    failure_cases: [invalid_state, business_error]
+  stop_parse:
+    success_shape: code_zero_nullable_data
+    failure_cases: [invalid_state, business_error]
+  list_chunks:
+    success_shape: paged_chunks
+    failure_cases: [not_found, malformed_positions, missing_required_field]
+  retrieve:
+    success: ragflow-retrieval-response.json
+    failure_cases: [empty_result, malformed_positions, unmapped_document]
+
+transport_cases:
+  - http_400
+  - http_401
+  - http_404
+  - http_429_with_retry_after
+  - http_500
+  - http_502
+  - http_503
+  - http_504
+  - connect_timeout
+  - read_timeout
+  - connection_reset
+  - invalid_json
+  - http_200_business_code_nonzero
+  - unknown_response_fields
+
+rules:
+  raw_fixtures_only_in_adapter_tests: true
+  redact_api_keys_and_internal_hosts: true
+  do_not_include_business_documents: true
+  require_http_and_business_success: true

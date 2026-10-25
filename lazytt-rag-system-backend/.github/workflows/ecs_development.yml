@@ -1,0 +1,156 @@
+# 后端 ECS 开发发布：直接构建或核验候选镜像，不再调用独立 CI 质量检查。
+# 管理员迁移和首次账号/模型设置不由 push 自动执行。
+name: ecs_development
+
+on:
+  push:
+    branches: [dev]
+    paths-ignore: ["frontend/**", "admin-frontend/**", "user-frontend/**"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 制品构建、准备或正式发布（迁移另走显式管理员入口）
+        type: choice
+        options: [build, prepare, release]
+        default: build
+      candidate_image:
+        description: 复用候选时填写 GHCR 完整 digest，必须同时填写 candidate_revision
+        type: string
+      candidate_revision:
+        description: 复用候选的完整 Git SHA
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lazytt-rag-ecs-dev
+  cancel-in-progress: false
+
+jobs:
+  artifact:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      revision: ${{ steps.image.outputs.revision }}
+    steps:
+      # 固定官方 v6 提交，满足企业完整 SHA 校验并避免标签漂移。
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_revision || github.sha }}
+      - name: Build or verify immutable candidate
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_USER: ${{ github.actor }}
+          GH_REPOSITORY: ${{ github.repository }}
+          CANDIDATE_IMAGE: ${{ inputs.candidate_image }}
+          CANDIDATE_REVISION: ${{ inputs.candidate_revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          registry_image="ghcr.io/${GH_REPOSITORY,,}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GH_USER" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          if [[ -n "$CANDIDATE_IMAGE" || -n "$CANDIDATE_REVISION" ]]; then
+            [[ "$CANDIDATE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$CANDIDATE_IMAGE" =~ ^ghcr\.io/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$revision" == "$CANDIDATE_REVISION" ]]
+            image="$CANDIDATE_IMAGE"
+          else
+            docker buildx create --use
+            docker buildx build --platform linux/amd64 --build-arg "BUILD_COMMIT=$revision" \
+              --label "org.opencontainers.image.source=https://github.com/$GH_REPOSITORY" \
+              --tag "$registry_image:$revision" --metadata-file /tmp/rag-build.json --push .
+            digest="$(python3 -c 'import json; print(json.load(open("/tmp/rag-build.json"))["containerimage.digest"])')"
+            image="$registry_image@$digest"
+          fi
+          docker pull "$image"
+          [[ "$(docker inspect --format '{{.Architecture}}' "$image")" == amd64 ]]
+          [[ "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$revision" ]]
+          printf 'image=%s\nrevision=%s\n' "$image" "$revision" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: artifact
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode != 'build')
+    runs-on: ubuntu-latest
+    environment: development
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # 固定官方 v6 提交，满足企业完整 SHA 校验并避免标签漂移。
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.artifact.outputs.revision }}
+      # 环境级变量在 Job 启动后可用；在执行步骤判断开关，避免 Job 提前误判为空。
+      # 手动 prepare/release 仍为显式操作，只有 dev push 受自动发布开关控制。
+      - name: Deliver candidate and run the ECS phase
+        if: github.event_name == 'workflow_dispatch' || vars.ECS_DEPLOY_ENABLED == 'true'
+        env:
+          ECS_HOST: ${{ vars.ECS_HOST }}
+          ECS_USER: ${{ vars.ECS_USER }}
+          ECS_PORT: ${{ vars.ECS_PORT || '22' }}
+          ECS_REPO_DIR: ${{ vars.ECS_REPO_DIR }}
+          ECS_ENV_FILE: ${{ vars.ECS_ENV_FILE || '/etc/lazytt/rag.env' }}
+          SSH_PRIVATE_KEY: ${{ secrets.ECS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ github.token }}
+          GH_USER: ${{ github.actor }}
+          IMAGE: ${{ needs.artifact.outputs.image }}
+          REVISION: ${{ needs.artifact.outputs.revision }}
+          MODE: ${{ inputs.mode || 'release' }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ECS_HOST" =~ ^[a-zA-Z0-9.-]+$ && "$ECS_USER" =~ ^[a-zA-Z0-9_-]+$ && "$ECS_PORT" =~ ^[0-9]+$ ]]
+          [[ "$ECS_REPO_DIR" =~ ^/[a-zA-Z0-9_./-]+$ && "$ECS_ENV_FILE" =~ ^/[a-zA-Z0-9_./-]+$ ]]
+          [[ "$MODE" == prepare || "$MODE" == release ]]
+          if [[ "$EVENT_NAME" == push ]]; then
+            [[ "$(git ls-remote origin refs/heads/dev | cut -f1)" == "$REVISION" ]]
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/rag-deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/rag-deploy" "$HOME/.ssh/known_hosts"
+          # 拉取镜像时发布工具不持续输出；SSH 保活避免空闲链路被中间设备断开。
+          ssh_args=(-i "$HOME/.ssh/rag-deploy" -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          target="$ECS_USER@$ECS_HOST"
+          stage="$(ssh "${ssh_args[@]}" "$target" 'mktemp -d /tmp/rag-release.XXXXXXXX')"
+          [[ "$stage" =~ ^/tmp/rag-release\.[a-zA-Z0-9]+$ ]]
+          cleanup() {
+            ssh "${ssh_args[@]}" "$target" "rm -f '$stage/compose.dev.yml' '$stage/release.py' '$stage/service_conf.postgres.yaml.template' '$stage/docker/config.json'; rmdir '$stage/docker' '$stage'" >/dev/null 2>&1 || true
+            rm -f "$HOME/.ssh/rag-deploy"
+          }
+          trap cleanup EXIT
+          scp -i "$HOME/.ssh/rag-deploy" -P "$ECS_PORT" -o StrictHostKeyChecking=yes \
+            compose.dev.yml deploy/ecs/release.py deploy/ecs/ragflow/service_conf.postgres.yaml.template "$target:$stage/"
+          # 登录凭据通过 stdin 传递；ECS 不保留源码 checkout，也不需要安装项目依赖。
+          printf '%s' "$GH_TOKEN" | ssh "${ssh_args[@]}" "$target" \
+            "install -d -m 700 '$stage/docker'; DOCKER_CONFIG='$stage/docker' docker login ghcr.io --username '$GH_USER' --password-stdin" >/dev/null
+          ssh "${ssh_args[@]}" "$target" bash -s -- "$stage" "$ECS_ENV_FILE" "$ECS_REPO_DIR" "$MODE" "$IMAGE" "$REVISION" <<'REMOTE'
+          set -euo pipefail
+          set +x
+          stage=$1
+          config=$2
+          directory=$3
+          mode=$4
+          image=$5
+          revision=$6
+          export DOCKER_CONFIG="$stage/docker"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          test "$(stat -c '%U:%G:%a' "$config")" = root:root:600
+          bash -n "$config"
+          . "$config"
+          python3 "$stage/release.py" --mode "$mode" --directory "$directory" \
+            --source-compose "$stage/compose.dev.yml" \
+            --source-template "$stage/service_conf.postgres.yaml.template" \
+            --image "$image" --revision "$revision" </dev/null
+          REMOTE

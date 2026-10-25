@@ -1,0 +1,125 @@
+# 独立存储栈：只负责数据库、缓存、对象存储和检索引擎，不启动任何业务进程。
+# 所有命名卷显式沿用历史名称，升级后不会丢弃已有本地数据；停止时禁止使用 down -v。
+# 沿用拆分前项目名，Docker Compose 会原地接管已有存储容器，而不是创建一套并行
+# 容器去竞争同一数据卷。两个 Compose 文件只是在同一项目下负责不同服务集合。
+name: lazytt-ragflow-poc
+
+services:
+  app-postgres:
+    image: ${APP_POSTGRES_IMAGE}
+    environment:
+      POSTGRES_DB: ${APP_POSTGRES_DATABASE}
+      POSTGRES_USER: ${APP_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/18/docker
+      TZ: UTC
+    volumes:
+      - app_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+
+  redis-stack:
+    # DB 0=应用缓存，DB 1=RAGFlow，DB 2=Celery；单实例必须禁止驱逐。
+    image: ${REDIS_STACK_IMAGE}
+    environment:
+      REDIS_STACK_PASSWORD: ${REDIS_STACK_PASSWORD}
+      REDIS_ARGS: >-
+        --appendonly yes
+        --appendfsync everysec
+        --requirepass ${REDIS_STACK_PASSWORD}
+        --maxmemory ${REDIS_STACK_MAXMEMORY:-1gb}
+        --maxmemory-policy noeviction
+    volumes:
+      - redis_stack_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_STACK_PASSWORD" --no-auth-warning ping | grep -q PONG']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+
+  ragflow-postgres:
+    image: ${RAGFLOW_POSTGRES_IMAGE}
+    environment:
+      POSTGRES_DB: ${RAGFLOW_POSTGRES_DATABASE}
+      POSTGRES_USER: ${RAGFLOW_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${RAGFLOW_POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/18/docker
+      TZ: UTC
+    volumes:
+      - ragflow_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+
+  elasticsearch:
+    image: ${ELASTICSEARCH_IMAGE}
+    environment:
+      node.name: elasticsearch
+      cluster.name: lazytt-ragflow
+      discovery.type: single-node
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      bootstrap.memory_lock: "false"
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms1g -Xmx1g}
+      cluster.routing.allocation.disk.watermark.low: 5gb
+      cluster.routing.allocation.disk.watermark.high: 3gb
+      cluster.routing.allocation.disk.watermark.flood_stage: 2gb
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:$$ELASTIC_PASSWORD http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 30s
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+
+  minio:
+    image: ${MINIO_IMAGE}
+    command: ["server", "--console-address", ":9001", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    networks: [ragflow-backplane]
+    restart: unless-stopped
+
+networks:
+  ragflow-backplane:
+    # 与 runtime Compose 使用相同项目名和显式网络名；任一 Compose 都能在全新
+    # 环境中先启动并创建网络，另一栈随后直接复用。
+    driver: bridge
+    name: ${RAG_DOCKER_NETWORK:-lazytt-ragflow-poc_ragflow-backplane}
+
+volumes:
+  # ``name`` 固定为拆分前 Compose 创建的卷名，使升级过程原地复用已有数据。
+  app_postgres_data:
+    name: lazytt-ragflow-poc_app_postgres_data
+  redis_stack_data:
+    name: lazytt-ragflow-poc_redis_stack_data
+  ragflow_postgres_data:
+    name: lazytt-ragflow-poc_ragflow_postgres_data
+  elasticsearch_data:
+    name: lazytt-ragflow-poc_elasticsearch_data
+  minio_data:
+    name: lazytt-ragflow-poc_minio_data

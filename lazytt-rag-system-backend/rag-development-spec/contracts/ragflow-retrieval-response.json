@@ -1,0 +1,31 @@
+{
+  "code": 0,
+  "data": {
+    "chunks": [
+      {
+        "content": "RAGFlow 从 v0.22.0 起可将 MinerU 作为可选 PDF 解析器。",
+        "content_ltks": "ragflow mineru pdf parser",
+        "document_id": "11111111111111111111111111111111",
+        "document_keyword": "parser-guide.pdf",
+        "highlight": "",
+        "id": "engine-chunk-001",
+        "image_id": "",
+        "important_keywords": ["MinerU"],
+        "tag_kwd": [],
+        "kb_id": "22222222222222222222222222222222",
+        "positions": [[6, 10, 20, 500, 80]],
+        "similarity": 0.86,
+        "term_similarity": 0.72,
+        "vector_similarity": 0.91
+      }
+    ],
+    "doc_aggs": [
+      {
+        "count": 1,
+        "doc_id": "11111111111111111111111111111111",
+        "doc_name": "parser-guide.pdf"
+      }
+    ],
+    "total": 1
+  }
+}

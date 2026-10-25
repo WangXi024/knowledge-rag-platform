@@ -1,0 +1,149 @@
+# 管理端 dev 发布：构建并校验镜像，再通过 SSH 更新 ECS 上独立的管理端容器。
+# 当前页面只有联调身份模拟，因此服务只监听 ECS 回环地址。
+name: ECS admin frontend
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lazytt-rag-admin-dev
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest_image: ${{ steps.build.outputs.digest_image }}
+    steps:
+      # 与 RAG 后端流水线保持一致，固定完整提交 SHA，满足仓库的 Actions 安全规则。
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: 构建并验证管理端镜像
+        id: build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/admin-context"
+          mkdir -p "$context"
+          git archive HEAD | tar -x -C "$context"
+          docker buildx create --use
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            docker buildx build --platform linux/amd64 --load -t "$image:pr-check" "$context"
+          else
+            printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            docker buildx build --platform linux/amd64 --push -t "$image:$GITHUB_SHA" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --metadata-file "$RUNNER_TEMP/admin-image.json" "$context"
+            digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/admin-image.json")"
+            printf 'digest_image=%s@%s\n' "$image" "$digest" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: image
+    if: github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: development
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: 更新 ECS 管理端
+        if: vars.ECS_DEPLOY_ENABLED == 'true'
+        shell: bash
+        env:
+          ECS_HOST: ${{ vars.ECS_HOST }}
+          ECS_USER: ${{ vars.ECS_USER }}
+          ECS_PORT: ${{ vars.ECS_PORT || '22' }}
+          ECS_REPO_DIR: ${{ vars.ECS_REPO_DIR }}
+          GATEWAY_BASE_URL: ${{ vars.GATEWAY_BASE_URL }}
+          SSH_PRIVATE_KEY: ${{ secrets.ECS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.image.outputs.digest_image }}
+        run: |
+          set -euo pipefail
+          [[ "$ECS_HOST" =~ ^[A-Za-z0-9.-]+$ && "$ECS_USER" =~ ^[A-Za-z0-9_-]+$ ]]
+          [[ "$ECS_PORT" =~ ^[0-9]{1,5}$ ]] && (( ECS_PORT >= 1 && ECS_PORT <= 65535 ))
+          [[ "$ECS_REPO_DIR" =~ ^/[A-Za-z0-9_./-]+$ && "$ECS_REPO_DIR" != *..* && "$ECS_REPO_DIR" != / ]] || {
+            echo 'ECS_REPO_DIR 的值必须只包含绝对路径，不能包含 ECS_REPO_DIR= 前缀' >&2
+            exit 1
+          }
+          [[ "$GATEWAY_BASE_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]]
+          [[ "$IMAGE" =~ ^ghcr\.io/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]
+          [[ -n "$SSH_PRIVATE_KEY" && -n "$SSH_KNOWN_HOSTS" ]]
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/rag-admin-deploy"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/rag-admin-deploy" "$HOME/.ssh/known_hosts"
+          # 拉取镜像期间每 15 秒发送 SSH 保活；连续 4 次无响应则退出，避免无限等待。
+          ssh_args=(-i "$HOME/.ssh/rag-admin-deploy" -p "$ECS_PORT" -o StrictHostKeyChecking=yes
+            -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          target="$ECS_USER@$ECS_HOST"
+          echo '准备 ECS 部署目录'
+          stage="$(ssh "${ssh_args[@]}" "$target" 'mktemp -d /tmp/rag-admin-release.XXXXXXXX')"
+          [[ "$stage" =~ ^/tmp/rag-admin-release\.[A-Za-z0-9]+$ ]]
+          cleanup() {
+            ssh "${ssh_args[@]}" "$target" "DOCKER_CONFIG='$stage' docker logout ghcr.io >/dev/null 2>&1 || true; rm -f '$stage/config.json'; rmdir '$stage'" >/dev/null 2>&1 || true
+            rm -f "$HOME/.ssh/rag-admin-deploy"
+          }
+          trap cleanup EXIT
+          echo '登录容器镜像仓库'
+          printf '%s' "$GH_TOKEN" | ssh "${ssh_args[@]}" "$target" \
+            "DOCKER_CONFIG='$stage' docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          echo '镜像仓库登录成功，开始远程部署'
+          # 只接管带本流水线标签的容器；失败时恢复上一镜像。
+          ssh "${ssh_args[@]}" "$target" bash -s -- "$stage" "$ECS_REPO_DIR" "$IMAGE" "$GATEWAY_BASE_URL" <<'REMOTE'
+          set -euo pipefail
+          export DOCKER_CONFIG="$1"
+          directory="$2"
+          image="$3"
+          gateway="$4"
+          name=lazytt-rag-admin-dev
+          mkdir -p "$directory"
+          # 保留镜像拉取进度，便于区分下载缓慢、SSH 断线和容器启动失败。
+          echo '开始拉取管理端镜像'
+          docker pull "$image"
+          echo '镜像拉取完成，准备更新管理端容器'
+          previous="$(docker inspect -f '{{.Config.Image}}' "$name" 2>/dev/null || true)"
+          previous_gateway=''
+          if [[ -n "$previous" ]]; then
+            [[ "$(docker inspect -f '{{index .Config.Labels "com.lazytt.service"}}' "$name")" == rag-admin-dev ]]
+            previous_gateway="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" | sed -n 's/^GATEWAY_BASE_URL=//p')"
+            docker rm -f "$name" >/dev/null
+          fi
+          start_container() {
+            docker run -d --name "$name" --label com.lazytt.service=rag-admin-dev \
+              --init --network host --restart unless-stopped \
+              -e "GATEWAY_BASE_URL=$2" "$1" >/dev/null
+            for _ in {1..30}; do
+              [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" == healthy ]] && return 0
+              sleep 2
+            done
+            return 1
+          }
+          echo '启动管理端容器并等待健康检查'
+          if ! start_container "$image" "$gateway"; then
+            # 删除失败容器前保留状态和探针结果；不输出包含环境变量的完整 inspect。
+            docker inspect -f '容器状态={{.State.Status}}，退出码={{.State.ExitCode}}，OOM={{.State.OOMKilled}}，健康检查={{json .State.Health}}' "$name" || true
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            if [[ -n "$previous" ]]; then start_container "$previous" "$previous_gateway" || true; fi
+            echo '管理端健康检查失败，已尝试恢复上一镜像' >&2
+            exit 1
+          fi
+          printf '%s\n' "$image" > "$directory/.lazytt-rag-admin-image"
+          echo '管理端部署完成，健康检查通过'
+          REMOTE

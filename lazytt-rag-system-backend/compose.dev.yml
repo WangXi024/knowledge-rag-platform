@@ -1,0 +1,399 @@
+# ECS 开发环境后端；镜像 digest 由发布工具固化，真实配置由主机 export 文件注入。
+name: lazytt-rag-ecs-dev
+services:
+  ragflow-server:
+    image: ${RAGFLOW_IMAGE}
+    platform: linux/amd64
+    environment: &id001
+      DB_TYPE: postgres
+      DOC_ENGINE: elasticsearch
+      STORAGE_IMPL: MINIO
+      API_PROXY_SCHEME: python
+      REGISTER_ENABLED: ${RAGFLOW_REGISTER_ENABLED:-0}
+      DISABLE_PASSWORD_LOGIN: '0'
+      ALLOW_ANY_HOST: '0'
+      POSTGRES_HOST: ${RAGFLOW_POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${RAGFLOW_POSTGRES_PORT:-5432}
+      POSTGRES_DBNAME: ${RAGFLOW_POSTGRES_DATABASE:-}
+      POSTGRES_USER: ${RAGFLOW_POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${RAGFLOW_POSTGRES_PASSWORD:-}
+      ES_SCHEME: ${RAGFLOW_ES_SCHEME:-http}
+      ES_HOST: ${RAGFLOW_ES_HOST:-elasticsearch}
+      ES_PORT: ${RAGFLOW_ES_PORT:-9200}
+      ES_USER: ${RAGFLOW_ES_USER:-}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-}
+      MINIO_HOST: ${RAGFLOW_MINIO_HOST:-minio}
+      MINIO_PORT: ${RAGFLOW_MINIO_PORT:-9000}
+      MINIO_USER: ${MINIO_USER:-}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-}
+      REDIS_HOST: ${REDIS_STACK_HOST:-redis-stack}
+      REDIS_PORT: ${REDIS_STACK_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_STACK_PASSWORD:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      MINIO_BUCKET: ${RAGFLOW_MINIO_BUCKET:-}
+      MINIO_PREFIX_PATH: ${RAGFLOW_MINIO_PREFIX_PATH:-}
+      REDIS_USERNAME: ${RAGFLOW_REDIS_USERNAME:-}
+      RAGFLOW_PG_POOL_SIZE: ${RAGFLOW_PG_POOL_SIZE:-20}
+    volumes: &id002
+    # ECS 模板独立维护，发布时复制到当前候选版本的配置目录。
+    - ./deploy/ecs/ragflow/service_conf.postgres.yaml.template:/ragflow/conf/service_conf.yaml.template:ro
+    - ragflow_logs:/ragflow/logs
+    networks: &id003
+    - ragflow-backplane
+    restart: always
+    depends_on:
+      rag-app-schema-check:
+        condition: service_completed_successfully
+    command:
+    - --disable-taskexecutor
+    - --disable-datasync
+    ports:
+    - 127.0.0.1:${RAGFLOW_API_PORT:-19381}:9380
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl -fsS http://127.0.0.1:9380/api/v1/system/healthz >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '2.0'
+    mem_limit: 4g
+  ragflow-task-executor:
+    image: ${RAGFLOW_IMAGE}
+    platform: linux/amd64
+    environment:
+      <<: *id001
+      # 执行器同时处理的文档任务数；不控制 Celery Worker 的进程数。
+      MAX_CONCURRENT_TASKS: ${RAGFLOW_MAX_CONCURRENT_TASKS:-10}
+      # 切片构建与向量生成分别使用该并发上限。
+      MAX_CONCURRENT_CHUNK_BUILDERS: ${RAGFLOW_MAX_CONCURRENT_CHUNK_BUILDERS:-10}
+    volumes: *id002
+    networks: *id003
+    restart: always
+    command:
+    - --disable-webserver
+    - --disable-datasync
+    - --workers=1
+    - --host-id=ragflow-task-executor
+    depends_on:
+      ragflow-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pgrep -f '[r]ag/svr/task_executor.py' >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    # 限制执行器容器可用的 CPU 与内存；任务并发由上面的环境变量控制。
+    cpus: '4.0'
+    mem_limit: 8g
+  rag-app-schema-check:
+    image: ${RAG_APP_IMAGE}
+    environment: &id006
+      RAG_STORAGE_MODE: external
+      APP_DATABASE_DSN: ${APP_DATABASE_DSN:-}
+      RAGFLOW_POSTGRES_HOST: ${RAGFLOW_POSTGRES_HOST:-postgres}
+      RAGFLOW_POSTGRES_PORT: ${RAGFLOW_POSTGRES_PORT:-5432}
+      RAGFLOW_POSTGRES_DATABASE: ${RAGFLOW_POSTGRES_DATABASE:-}
+      RAGFLOW_POSTGRES_USER: ${RAGFLOW_POSTGRES_USER:-}
+      RAGFLOW_POSTGRES_PASSWORD: ${RAGFLOW_POSTGRES_PASSWORD:-}
+    networks: &id004
+    - ragflow-backplane
+    restart: 'no'
+    command:
+    - python
+    - -m
+    - rag_service.cli
+    - schema
+    - check
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '1.0'
+    mem_limit: 1g
+  rag-app-bootstrap:
+    image: ${RAG_APP_IMAGE}
+    environment: &id005
+      RAG_CONFIG_PATH: /app/configs/application.yaml
+      RAG_STORAGE_MODE: external
+      APP_DATABASE_DSN: ${APP_DATABASE_DSN:-}
+      APP_REDIS_URL: ${APP_REDIS_URL:-}
+      CACHE_REDIS_URL: ${CACHE_REDIS_URL:-}
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-http://ragflow-server:9380}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      RAGFLOW_EMBEDDING_MODEL: ${RAGFLOW_EMBEDDING_MODEL:-}
+      RAGFLOW_VISION_MODEL: ${RAGFLOW_VISION_MODEL:-}
+      RAGFLOW_VISION_RUNTIME_MODEL: ${RAGFLOW_VISION_RUNTIME_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      REWRITE_MODEL: ${REWRITE_MODEL:-}
+      LLM_OMIT_SAMPLING_PARAMETERS: ${LLM_OMIT_SAMPLING_PARAMETERS:-false}
+      LLM_MAX_OUTPUT_TOKENS_FIELD: ${LLM_MAX_OUTPUT_TOKENS_FIELD:-max_tokens}
+      LLM_EXTRA_BODY_JSON: ${LLM_EXTRA_BODY_JSON:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      VISION_BASE_URL: ${VISION_BASE_URL:-}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+      MEDIA_VISION_BASE_URL: ${MEDIA_VISION_BASE_URL:-}
+      MEDIA_VISION_API_KEY: ${MEDIA_VISION_API_KEY:-}
+      MEDIA_VISION_MODEL: ${MEDIA_VISION_MODEL:-}
+      MEDIA_PROCESSING_ENABLED: ${MEDIA_PROCESSING_ENABLED:-false}
+      ASR_BASE_URL: ${ASR_BASE_URL:-}
+      ASR_API_KEY: ${ASR_API_KEY:-}
+      ASR_MODEL: ${ASR_MODEL:-}
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_API_KEY: ${RERANK_API_KEY:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
+      UPLOAD_STAGING_DIR: /var/lib/rag/uploads
+      PROFILE_SEED_DIR: /app/configs
+      BUILD_COMMIT: ${BUILD_COMMIT:-local}
+      BUILD_TIME: ${BUILD_TIME:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      LAZYTT_RAG_ENVIRONMENT: development
+      LAZYTT_RAG_PUBLIC_BASE_URL: ${LAZYTT_RAG_PUBLIC_BASE_URL:-http://127.0.0.1:19380}
+      LAZYTT_RAG_DB_POOL_SIZE: ${LAZYTT_RAG_DB_POOL_SIZE:-5}
+      LAZYTT_RAG_DB_MAX_OVERFLOW: ${LAZYTT_RAG_DB_MAX_OVERFLOW:-5}
+    networks: *id004
+    restart: 'no'
+    command:
+    - python
+    - -m
+    - rag_service.cli
+    - bootstrap
+    - all
+    depends_on:
+      rag-app-schema-check:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '1.0'
+    mem_limit: 1g
+  rag-gateway:
+    image: ${RAG_APP_IMAGE}
+    environment: *id005
+    networks: *id004
+    restart: always
+    command:
+    - uvicorn
+    - rag_service.api.main:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    ports:
+    # 默认保持回环；公网开发联调仅由管理员显式配置 Gateway 绑定地址。
+    - ${RAG_GATEWAY_BIND_HOST:-127.0.0.1}:${RAG_APP_PORT:-19380}:8080
+    volumes:
+    - upload_staging_data:/var/lib/rag/uploads
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=8).read()
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '1.0'
+    mem_limit: 1g
+  rag-worker:
+    image: ${RAG_APP_IMAGE}
+    environment: *id005
+    networks: *id004
+    restart: always
+    command:
+    - celery
+    - -A
+    - rag_service.workers.celery_app:celery_app
+    - worker
+    - --loglevel=INFO
+    # Celery 同时执行的摄取任务数；多出的任务留在队列中等待。
+    - --concurrency=${WORKER_CONCURRENCY:-10}
+    volumes:
+    - upload_staging_data:/var/lib/rag/uploads
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+      ragflow-server:
+        condition: service_healthy
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '2.0'
+    mem_limit: 2g
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - celery -A rag_service.workers.celery_app:celery_app inspect ping --destination "celery@$$HOSTNAME"
+        --timeout 5
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+  rag-scheduler:
+    image: ${RAG_APP_IMAGE}
+    environment: *id005
+    networks: *id004
+    restart: always
+    command:
+    - celery
+    - -A
+    - rag_service.workers.celery_app:celery_app
+    - beat
+    - --loglevel=INFO
+    - --schedule=/var/lib/rag/scheduler/celerybeat-schedule
+    volumes:
+    - upload_staging_data:/var/lib/rag/uploads
+    - scheduler_data:/var/lib/rag/scheduler
+    depends_on:
+      rag-app-bootstrap:
+        condition: service_completed_successfully
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '1.0'
+    mem_limit: 1g
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - from pathlib import Path; import time; p=list(Path('/var/lib/rag/scheduler').glob('celerybeat-schedule*'));
+        assert p and time.time()-max(f.stat().st_mtime for f in p)<600
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 360s
+  rag-app-migrate:
+    image: ${RAG_APP_IMAGE}
+    environment: *id006
+    networks:
+    - ragflow-backplane
+    restart: 'no'
+    command:
+    - python
+    - -m
+    - rag_service.cli
+    - schema
+    - check-app
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+    cpus: '1.0'
+    mem_limit: 1g
+    profiles:
+    - admin
+  # 可选官网 VLM 适配服务；仅接收云端 Token，发布入口负责启动和注册。
+  mineru-cloud-adapter:
+    profiles:
+    - mineru
+    image: ${RAG_APP_IMAGE}
+    command:
+    - uvicorn
+    - rag_service.infrastructure.mineru_cloud.server:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8000'
+    - --no-access-log
+    environment:
+      MINERU_CLOUD_API_TOKEN: ${MINERU_CLOUD_API_TOKEN:-}
+      MINERU_CLOUD_MODEL: ${MINERU_CLOUD_MODEL:-vlm}
+      # 适配器同时接收的解析请求数；槽位用完时返回忙。
+      MINERU_CLOUD_MAX_CONCURRENCY: ${MINERU_CLOUD_MAX_CONCURRENCY:-10}
+      # 同时下载和解压官网解析结果的数量，限制结果处理阶段的内存峰值。
+      MINERU_CLOUD_RESULT_CONCURRENCY: ${MINERU_CLOUD_RESULT_CONCURRENCY:-2}
+    networks:
+    - ragflow-backplane
+    restart: always
+    cpus: '1.0'
+    mem_limit: 2g
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready',
+        timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    platform: linux/amd64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    stop_grace_period: 120s
+    pids_limit: 512
+networks:
+  ragflow-backplane:
+    driver: bridge
+volumes:
+  upload_staging_data: {}
+  ragflow_logs: {}
+  scheduler_data: {}
