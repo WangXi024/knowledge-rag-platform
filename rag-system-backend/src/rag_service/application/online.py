@@ -29,7 +29,13 @@ from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.cache import cache_id, knowledge_base_revisions_hash, metadata_filter_hash
 from rag_service.domain.errors import LlmError, RagError, ResourceNotFoundError
-from rag_service.domain.graph import GraphPort, GraphRepository, GraphState, GraphStatus
+from rag_service.domain.graph import (
+    NATIVE_GRAPH_QUERY_MODE,
+    GraphPort,
+    GraphRepository,
+    GraphState,
+    GraphStatus,
+)
 from rag_service.domain.models import (
     AnswerOutcome,
     Citation,
@@ -71,7 +77,7 @@ _CITATION_LABEL = re.compile(r"\[C([1-9][0-9]*)\]")
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _ANSWER_PROMPT_PROFILE = "rag-answer-localized@1"
 _CITATION_REPAIR_PROMPT_PROFILE = "citation-repair-localized@1"
-# 图谱为可选增强，限制整条路线预算，避免多知识库请求串行放大模型调用和等待时间。
+# 图谱为可选增强，限制整条结构导航预算，避免多知识库请求放大引擎调用和等待时间。
 _NATIVE_GRAPH_MAX_KBS = 2
 _NATIVE_GRAPH_TIMEOUT_SECONDS = 8.0
 _RESPONSE_LANGUAGE_NAMES = {
@@ -454,8 +460,8 @@ class OnlineService:
             )
             warnings.append("retrieval_threshold_fallback")
 
-        # 原生 KG 只提供导航。每个目标库在整次请求中至多调用一次 navigate，不因
-        # 中英文或阈值回退重复调用收费模型；补召回仍使用原有普通 Chunk 引擎端口。
+        # 原生图结构只提供导航。每个目标库在整次请求中至多调用一次 navigate，
+        # 不因中英文或阈值回退重复读取结构；补召回仍使用普通 Chunk 引擎端口。
         native_started_at = time.perf_counter()
         native_candidates, native_warnings, native_routes, graph_query_count = (
             await self._native_graph_candidates(
@@ -1523,6 +1529,7 @@ class OnlineService:
                     "enabled": state.configuration.enabled if state else False,
                     "retrieval_enabled": state.configuration.retrieval_enabled if state else False,
                     "profile": state.configuration.profile_ref if state else None,
+                    "navigation_mode": NATIVE_GRAPH_QUERY_MODE,
                 }
             )
             if state is None or not state.configuration.enabled:
@@ -1569,7 +1576,7 @@ class OnlineService:
         digest = hashlib.sha256(
             json.dumps(versions, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        mode = "native" if targets else "off"
+        mode = NATIVE_GRAPH_QUERY_MODE if targets else "off"
         if metadata_filter is not None:
             mode = "metadata_filter_bypass"
         elif document_ids:
@@ -1592,8 +1599,8 @@ class OnlineService:
     ) -> tuple[tuple[RetrievalCandidate, ...], tuple[str, ...], tuple[str, ...], int]:
         """每库一次原生导航再补原文召回；拒绝范围不符结果，异常只降级可选路线。
 
-        聚合、实体描述和社区报告不进入候选。来源指针也不绕过现有引擎的活动版本
-        映射；这里只使用有限关键词进行正常关键词检索。
+        聚合、实体描述和社区报告不进入候选。v0.26.4 的官方图结构只提供有限实体
+        邻居；这里只用导航词进行正常关键词检索，并在诊断中区分 use_kg 聚合路径。
         """
         if self._native_graph is None:
             return (), (), (), 0
@@ -1655,6 +1662,7 @@ class OnlineService:
                     )
                 candidates = _merge_candidate_routes(candidates, original_candidates)
                 routes.append(route.name)
+                warnings.append("native_graph_structural_navigation")
             except Exception:
                 warnings.append("native_graph_unavailable")
         return candidates, tuple(dict.fromkeys(warnings)), tuple(dict.fromkeys(routes)), query_count

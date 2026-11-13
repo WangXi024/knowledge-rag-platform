@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import re
+import unicodedata
 from http import HTTPStatus
 from io import StringIO
 from typing import Any
@@ -37,6 +39,10 @@ _GRAPH_TITLE = "Related content in Knowledge Graph"
 _PAGE_SIZE = 100
 _MAX_DOCUMENTS = 100_000
 _MAX_NAVIGATION_TERMS = 32
+_MAX_STRUCTURAL_NODES = 256
+_MAX_STRUCTURAL_EDGES = 1024
+_MAX_STRUCTURAL_TERMS = 8
+_MAX_GRAPH_RESPONSE_BYTES = 4 * 1024 * 1024
 _GRAPH_SECTIONS = re.compile(r"^---- (Entities|Relations|Community Report) ----\s*$", re.M)
 
 
@@ -45,6 +51,22 @@ def _object(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RagFlowError.invalid_response()
     return value
+
+
+def _response_data(value: Any) -> Any:
+    """统一成功 Envelope 的业务码校验，不回显上游失败响应或诊断正文。"""
+    envelope = _object(value)
+    if isinstance(envelope.get("code"), bool) or envelope.get("code") != 0:
+        raise RagFlowError.downstream()
+    return envelope.get("data")
+
+
+def _successful_response(response: httpx.Response) -> None:
+    """在读响应体前映射 HTTP 错误；大错误页不能绕过只读图谱的资源上限。"""
+    if response.status_code == 401:
+        raise RagFlowError.unauthorized()
+    if not response.is_success:
+        raise RagFlowError.downstream(retryable=response.status_code in {429, 502, 503, 504})
 
 
 def _identifier(value: Any) -> str:
@@ -104,6 +126,40 @@ def _graph_terms(content: Any, limit: int) -> tuple[str, ...]:
     return tuple(terms)
 
 
+def _match_text(value: str) -> str:
+    """统一实体匹配的兼容字符、大小写及空白；不解释图谱中的任何描述指令。"""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(
+        "".join(
+            " " if unicodedata.category(character) in {"Cc", "Cf"} else character
+            for character in normalized
+        ).split()
+    )
+
+
+def _entity_label(value: Any) -> tuple[str, str]:
+    """校验原生实体名称并返回显示值与规范匹配值，不从描述补造实体名。"""
+    label = _term(value)
+    if label is None or any(unicodedata.category(character) in {"Cc", "Cf"} for character in label):
+        raise RagFlowError.invalid_response()
+    normalized = _match_text(label)
+    if not normalized or len(normalized) > 160 or not any(char.isalnum() for char in normalized):
+        raise RagFlowError.invalid_response()
+    return label, normalized
+
+
+def _entity_matches(question: str, entity: str) -> bool:
+    """匹配完整实体短语；ASCII 使用词边界，中文名称允许自然句中的连续子串。
+
+    词边界只约束 ASCII 字母、数字和下划线，使 ATLAS 不会命中 ATLASES，同时
+    “Atlas项目”这样的中英文混排仍能正确命中；正则元字符一律作为名称字面量。
+    """
+    ascii_word = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    prefix = r"(?<![A-Za-z0-9_])" if entity[0] in ascii_word else ""
+    suffix = r"(?![A-Za-z0-9_])" if entity[-1] in ascii_word else ""
+    return re.search(f"{prefix}{re.escape(entity)}{suffix}", question) is not None
+
+
 class RagFlowGraphAdapter:
     """实现隔离的原生图谱端口；客户端支持注入 MockTransport 做无网络契约验收。"""
 
@@ -149,6 +205,8 @@ class RagFlowGraphAdapter:
         Python 的取消异常保持传播，以便 Worker 安全停止轮询。
         """
         try:
+            if method == "GET" and path.endswith("/graph"):
+                return _response_data(await self._read_graph_response(path, **kwargs))
             response = await self._client.request(
                 method,
                 path,
@@ -164,17 +222,47 @@ class RagFlowGraphAdapter:
             raise RagFlowError.timeout() from exc
         except httpx.RequestError as exc:
             raise RagFlowError.connection() from exc
-        if response.status_code == 401:
-            raise RagFlowError.unauthorized()
-        if not response.is_success:
-            raise RagFlowError.downstream(retryable=response.status_code in {429, 502, 503, 504})
+        _successful_response(response)
         try:
-            envelope = _object(response.json())
+            payload = response.json()
         except ValueError as exc:
             raise RagFlowError.invalid_response() from exc
-        if isinstance(envelope.get("code"), bool) or envelope.get("code") != 0:
-            raise RagFlowError.downstream()
-        return envelope.get("data")
+        return _response_data(payload)
+
+    async def _read_graph_response(self, path: str, **kwargs: Any) -> Any:
+        """只读图谱采用流式读取，JSON 解析前最多接收 4 MiB，不全量 aread。
+
+        已声明的大 Content-Length 在迭代之前拒绝；未知长度或分块传输按解码后字节
+        累计限额，越限立即关闭响应。只读图谱显式请求 identity 编码，正常小响应与
+        其他 API 的 HTTP、超时和 Envelope 错误契约保持一致。
+        """
+        async with self._client.stream(
+            "GET", path,
+            headers={
+                "Authorization": f"Bearer {self._settings.api_key}",
+                "Accept-Encoding": "identity",
+            },
+            timeout=self._settings.read_timeout_seconds,
+            **kwargs,
+        ) as response:
+            _successful_response(response)
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError as exc:
+                    raise RagFlowError.invalid_response() from exc
+                if not 0 <= declared_length <= _MAX_GRAPH_RESPONSE_BYTES:
+                    raise RagFlowError.invalid_response()
+            body = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=65_536):
+                if len(body) + len(chunk) > _MAX_GRAPH_RESPONSE_BYTES:
+                    raise RagFlowError.invalid_response()
+                body.extend(chunk)
+            try:
+                return json.loads(body)
+            except ValueError as exc:
+                raise RagFlowError.invalid_response() from exc
 
     async def _knowledge_base(
         self, security_scope_id: str, knowledge_base_id: UUID, graph_generation: int
@@ -437,10 +525,105 @@ class RagFlowGraphAdapter:
         *,
         limit: int = 8,
     ) -> GraphNavigation:
-        """把真实 KG 聚合分流为导航词；普通块只留已活动文档的可核验来源指针。
+        """读取真实原生图结构，以精确实体及一跳邻居导航到普通原文检索。
 
-        本端口故意没有文档或元数据过滤参数，上层遇到此类限制必须跳过图谱。
-        无文档 ID 的未知块直接忽略，不触发普通候选映射或生成虚假引用。
+        v0.26.4 的原生 use_kg 检索已实测不能可靠返回 KG 聚合，在线默认使用
+        官方只读 graph 接口；这不代表 use_kg 成功，也不调用额外图谱查询模型。
+        所有节点和边先验证活动来源，再对实体名做确定性匹配。描述、实体类型和
+        关系摘要均不作为回答证据或扩展词，最终引用仍须重新检索原始文档块。
+        """
+        knowledge_base = await self._knowledge_base(
+            security_scope_id, knowledge_base_id, graph_generation
+        )
+        self._require_enabled()
+        if (
+            not question.strip() or isinstance(limit, bool)
+            or not 1 <= limit <= _MAX_STRUCTURAL_TERMS
+        ):
+            raise ValueError("question must be non-empty and structural limit must be within 1..8")
+        active_ids = await self._active_document_ids(knowledge_base)
+        # 官方 v0.26.4 路由没有读取 max_nodes 查询参数，不发送未经支持的假限额。
+        data = _object(await self._request("GET", f"{self._dataset_path(knowledge_base)}/graph"))
+        graph = _object(data.get("graph", {}))
+        nodes, edges = graph.get("nodes", []), graph.get("edges", [])
+        if (
+            not isinstance(nodes, list) or not isinstance(edges, list)
+            or len(nodes) > _MAX_STRUCTURAL_NODES or len(edges) > _MAX_STRUCTURAL_EDGES
+        ):
+            # 不截断后再检查：被截掉的尾部可能含跨范围来源或非法连接。
+            raise RagFlowError.invalid_response()
+
+        def source_ids(value: Any) -> frozenset[str]:
+            """验证原生 source_id 文档数组；它不是 Chunk ID，也不直接形成引用。"""
+            if not isinstance(value, list) or not value:
+                raise RagFlowError.invalid_response()
+            identifiers = frozenset(_identifier(identifier) for identifier in value)
+            if not identifiers <= active_ids:
+                # 原生图可能残留已删除版本；即使物理文档集合已清理，也不能采用旧图。
+                raise self._boundary_error()
+            return identifiers
+
+        validated: dict[str, tuple[str, str, frozenset[str]]] = {}
+        normalized_names: set[str] = set()
+        for value in nodes:
+            node = _object(value)
+            identifier, normalized_id = _entity_label(node.get("id"))
+            label, normalized_name = _entity_label(node.get("entity_name"))
+            if (
+                normalized_id != normalized_name or identifier in validated
+                or normalized_name in normalized_names
+            ):
+                raise RagFlowError.invalid_response()
+            validated[identifier] = (label, normalized_name, source_ids(node.get("source_id")))
+            normalized_names.add(normalized_name)
+
+        adjacent: dict[str, set[str]] = {identifier: set() for identifier in validated}
+        for value in edges:
+            edge = _object(value)
+            source, target = _identifier(edge.get("source")), _identifier(edge.get("target"))
+            if source not in validated or target not in validated:
+                raise RagFlowError.invalid_response()
+            source_ids(edge.get("source_id"))
+            # 连接仅用于找相邻实体，不把边描述或方向解释为事实声明。
+            adjacent[source].add(target)
+            adjacent[target].add(source)
+
+        normalized_question = _match_text(question)
+        seeds = sorted(
+            (identifier for identifier, (_, name, _) in validated.items()
+             if _entity_matches(normalized_question, name)),
+            key=lambda identifier: (-len(validated[identifier][1]), validated[identifier][1]),
+        )
+        # 只从原问题真正命中的实体出发；无命中不能用高 Pagerank 节点伪装语义命中。
+        seed_set = set(seeds)
+        neighbors = sorted(
+            {neighbor for seed in seeds for neighbor in adjacent[seed]} - seed_set,
+            key=lambda identifier: validated[identifier][1],
+        )
+        selected = (*seeds, *neighbors)[:limit]
+        entities = tuple(validated[identifier][0] for identifier in selected)
+        document_ids = sorted({
+            document_id for identifier in selected for document_id in validated[identifier][2]
+        })[:limit]
+        return GraphNavigation(
+            security_scope_id, knowledge_base_id, graph_generation,
+            entities, entities,
+            tuple(GraphSourceReference(document_id) for document_id in document_ids),
+        )
+
+    async def probe_kg_navigation(
+        self,
+        security_scope_id: str,
+        knowledge_base_id: UUID,
+        graph_generation: int,
+        question: str,
+        *,
+        limit: int = 8,
+    ) -> GraphNavigation:
+        """仅供诊断官方 use_kg 路径；在线默认导航不调用本方法或等待查询模型。
+
+        保留真实 KG 聚合的 CSV 协议验证，便于独立定位上游修复；没有聚合时返回空
+        导航，不伪装 use_kg 已经成功，也不把无文档 ID 的摘要映射为原始 Chunk。
         """
         knowledge_base = await self._knowledge_base(
             security_scope_id, knowledge_base_id, graph_generation

@@ -1,0 +1,576 @@
+{
+  "version": "v0.26.4",
+  "image_digest": "sha256:16d24d1968ab59e2715a85d2590f1569c9539e0362344a42f3a23e8be06a655b",
+  "synthetic_only": true,
+  "note": "Captured official responses. use_kg returned ordinary chunks only; online navigation uses verified public graph structure.",
+  "build": {
+    "method": "POST",
+    "path": "/api/v1/datasets/dataset-a/index",
+    "query": "type=graph",
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {
+        "task_id": "task-1"
+      }
+    },
+    "elapsed_ms": 47.0
+  },
+  "dataset": {
+    "method": "GET",
+    "path": "/api/v1/datasets",
+    "query": {
+      "id": "dataset-a"
+    },
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": [
+        {
+          "artifact_task_finish_at": null,
+          "artifact_task_id": null,
+          "avatar": null,
+          "chunk_count": 2,
+          "chunk_method": "naive",
+          "create_date": "2026-11-13T13:19:11",
+          "create_time": 1794575951418,
+          "created_by": "tenant-a",
+          "description": "Synthetic only",
+          "document_count": 2,
+          "embedding_model": "BAAI/bge-m3@lazytt-embedding-baai-bge-m3-062cbcee44@OpenAI-API-Compatible",
+          "graphrag_task_finish_at": "2026-11-13T13:34:37.904420",
+          "graphrag_task_id": "task-1",
+          "id": "dataset-a",
+          "language": "English",
+          "mindmap_task_finish_at": null,
+          "mindmap_task_id": null,
+          "name": "02bc6cf9-Synthetic-native-GraphRAG-acceptance",
+          "nickname": "LazyTT Admin",
+          "pagerank": 0,
+          "parser_config": {
+            "auto_keywords": 0,
+            "auto_questions": 0,
+            "children_delimiter": "",
+            "chunk_token_num": 256,
+            "delimiter": "\n!?;。；！？",
+            "enable_children": false,
+            "graphrag": {
+              "batch_chunk_token_size": 4096,
+              "build_subgraph_min_timeout_seconds": 600,
+              "build_subgraph_timeout_per_chunk_seconds": 300,
+              "community": false,
+              "community_timeout_seconds": 1800,
+              "entity_types": [
+                "organization",
+                "person",
+                "geo",
+                "event",
+                "category"
+              ],
+              "lock_acquire_timeout_seconds": 600,
+              "merge_timeout_seconds": 180,
+              "method": "light",
+              "resolution": false,
+              "resolution_timeout_seconds": 1800,
+              "retry_attempts": 2,
+              "retry_backoff_max_seconds": 60.0,
+              "retry_backoff_seconds": 2.0,
+              "use_graphrag": true
+            },
+            "html4excel": true,
+            "image_context_size": 0,
+            "layout_recognize": "DeepDOC",
+            "llm_id": "acceptance-graph@lazytt-graph-chat-acceptance-graph-c160c6e5cd@OpenAI-API-Compatible",
+            "overlapped_percent": 10,
+            "parent_child": {
+              "children_delimiter": "\n",
+              "use_parent_child": false
+            },
+            "raptor": {
+              "max_cluster": 64,
+              "max_token": 256,
+              "prompt": "Please summarize the following paragraphs. Be careful with the numbers, do not make things up. Paragraphs as following:\n      {cluster_content}\nThe above is the content you need to summarize.",
+              "random_seed": 0,
+              "threshold": 0.1,
+              "use_raptor": false
+            },
+            "table_context_size": 0,
+            "topn_tags": 3
+          },
+          "permission": "me",
+          "pipeline_id": null,
+          "raptor_task_finish_at": null,
+          "raptor_task_id": null,
+          "similarity_threshold": 0.2,
+          "skill_task_finish_at": null,
+          "skill_task_id": null,
+          "status": "1",
+          "tenant_avatar": null,
+          "tenant_embd_id": null,
+          "tenant_id": "tenant-a",
+          "token_num": 184,
+          "update_date": "2026-11-13T13:34:37",
+          "update_time": 1794576877912,
+          "vector_similarity_weight": 0.3
+        }
+      ],
+      "total_datasets": 1
+    },
+    "elapsed_ms": 47.0
+  },
+  "progress": {
+    "method": "GET",
+    "path": "/api/v1/datasets/dataset-a/index",
+    "query": {
+      "type": "graph"
+    },
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {
+        "begin_at": "2026-11-13T13:27:30",
+        "chunk_ids": "",
+        "create_date": "2026-11-13T13:27:30",
+        "create_time": 1794576450813,
+        "digest": "96848a3c8041f231",
+        "doc_id": "graph_raptor_x",
+        "from_page": 100000000,
+        "id": "task-1",
+        "priority": 0,
+        "process_duration": 427.90442,
+        "progress": 1.0,
+        "progress_msg": "13:29:05 [GraphRAG] chunk_list returned 1 raw chunks for doc:document-2\n13:29:05 [GraphRAG] chunk_list combine 1 raw chunks to 1 chunks for LLM extraction for doc:document-2\n13:29:05 [GraphRAG] build_subgraph doc:document-2 start (chunks=1, timeout=600s, attempts=2)\n13:29:05 Start processing for document-1: \nAurora Labs develops the...\n13:29:05 Start processing for document-2: \nMira Chen leads the Atla...\n13:34:22 Completed processing for document-1: \nAurora Labs develops the... after 0 gleanings, 11029 tokens.\n13:34:22 Entities extraction of chunk 1 1/1 done, 6 nodes, 10 edges, 11029 tokens.\n13:34:22 Entities and relationships extraction done, 6 nodes, 10 edges, 11029 tokens, 316.88s.\n13:34:22 Entities merging done, 0.01s.\n13:34:22 Relationships merging done, 0.01s.\n13:34:22 generated subgraph for doc document-1 in 317.21 seconds.\n13:34:22 [GraphRAG] build_subgraph doc:document-1 done\n13:34:27 Completed processing for document-2: \nMira Chen leads the Atla... after 0 gleanings, 10778 tokens.\n13:34:27 Entities extraction of chunk 1 1/1 done, 6 nodes, 8 edges, 10778 tokens.\n13:34:27 Entities and relationships extraction done, 6 nodes, 8 edges, 10778 tokens, 322.47s.\n13:34:27 Entities merging done, 0.01s.\n13:34:27 Relationships merging done, 0.01s.\n13:34:28 generated subgraph for doc document-2 in 323.22 seconds.\n13:34:28 [GraphRAG] build_subgraph doc:document-2 done\n13:34:28 [GraphRAG] dataset:dataset-a merge lock acquired\n13:34:31 Batch-embedded 6 entity names (1 batches of 16).\n13:34:32 Batch-embedded 10 edge descriptions (1 batches of 16).\n13:34:32 Get embedding of edges: 9/10\n13:34:32 set_graph converted graph change to 18 chunks in 3.89s.\n13:34:32 set_graph removed 0 nodes and 0 edges from index in 0.11s.\n13:34:34 Insert chunks: 18/18\n13:34:34 set_graph added/updated 6 nodes and 10 edges from index in 2.06s.\n13:34:34 merging subgraph for doc document-1 into the global graph done in 6.08 seconds.\n13:34:35 Batch-embedded 3 entity names (1 batches of 16).\n13:34:35 Batch-embedded 6 edge descriptions (1 batches of 16).\n13:34:35 set_graph converted graph change to 17 chunks in 1.16s.\n13:34:36 set_graph removed 0 nodes and 0 edges from index in 0.04s.\n13:34:37 Insert chunks: 17/17\n13:34:37 set_graph added/updated 6 nodes and 8 edges from index in 1.85s.\n13:34:37 merging subgraph for doc document-2 into the global graph done in 3.06 seconds.\n13:34:37 [GraphRAG] dataset:dataset-a merge finished, graph ready.\n13:34:37 [GraphRAG] dataset:dataset-a cleared phase markers after merge.\n13:34:37 [GraphRAG] KB merge done in 333.41s. ok=2 / total=2\n13:34:37 Knowledge Graph done (333.43s)",
+        "retry_count": 1,
+        "task_type": "graphrag",
+        "to_page": 100000000,
+        "update_date": "2026-11-13T13:34:37",
+        "update_time": 1794576877904
+      }
+    },
+    "elapsed_ms": 16.0
+  },
+  "graph": {
+    "method": "GET",
+    "path": "/api/v1/datasets/dataset-a/graph",
+    "query": {},
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {
+        "graph": {
+          "directed": false,
+          "edges": [
+            {
+              "description": "Aurora Labs develops the Atlas project.<SEP>Atlas is a project led by Mira Chen for Aurora Labs, indicating that the Atlas project belongs to and is conducted on behalf of Aurora Labs.",
+              "keywords": [
+                "project development, research",
+                "project ownership, organizational affiliation"
+              ],
+              "source": "AURORA LABS",
+              "source_id": [
+                "document-1",
+                "document-2"
+              ],
+              "src_id": "ATLAS",
+              "target": "ATLAS",
+              "tgt_id": "AURORA LABS",
+              "weight": 18.0
+            },
+            {
+              "description": "Mira Chen serves as the appointed leader of the Atlas project.<SEP>Mira Chen leads the Atlas project.",
+              "keywords": [
+                "leadership, project management",
+                "project leadership"
+              ],
+              "source": "ATLAS",
+              "source_id": [
+                "document-1",
+                "document-2"
+              ],
+              "src_id": "ATLAS",
+              "target": "MIRA CHEN",
+              "tgt_id": "MIRA CHEN",
+              "weight": 18.0
+            },
+            {
+              "description": "Aurora Labs appointed Mira Chen as the leader of the Atlas project.<SEP>Mira Chen leads the Atlas project for Aurora Labs, indicating an affiliation with the organization.",
+              "keywords": [
+                "appointment, leadership",
+                "affiliation, leadership"
+              ],
+              "source": "AURORA LABS",
+              "source_id": [
+                "document-1",
+                "document-2"
+              ],
+              "src_id": "AURORA LABS",
+              "target": "MIRA CHEN",
+              "tgt_id": "MIRA CHEN",
+              "weight": 16.0
+            },
+            {
+              "description": "The Harbor Research Center is located in Northport.",
+              "keywords": [
+                "location"
+              ],
+              "source": "HARBOR RESEARCH CENTER",
+              "source_id": [
+                "document-2"
+              ],
+              "src_id": "HARBOR RESEARCH CENTER",
+              "target": "NORTHPORT",
+              "tgt_id": "NORTHPORT",
+              "weight": 10.0
+            },
+            {
+              "description": "Atlas is tested at the Harbor Research Center, and the Harbor Research Center hosts the Atlas pilot.",
+              "keywords": [
+                "testing, pilot hosting"
+              ],
+              "source": "ATLAS",
+              "source_id": [
+                "document-2"
+              ],
+              "src_id": "ATLAS",
+              "target": "HARBOR RESEARCH CENTER",
+              "tgt_id": "HARBOR RESEARCH CENTER",
+              "weight": 9.0
+            },
+            {
+              "description": "Mira Chen manages the Atlas engineering team.",
+              "keywords": [
+                "management, team leadership"
+              ],
+              "source": "MIRA CHEN",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "ATLAS ENGINEERING TEAM",
+              "target": "ATLAS ENGINEERING TEAM",
+              "tgt_id": "MIRA CHEN",
+              "weight": 9.0
+            },
+            {
+              "description": "The Harbor Research Center hosts the Atlas pilot.",
+              "keywords": [
+                "hosting, pilot program"
+              ],
+              "source": "HARBOR RESEARCH CENTER",
+              "source_id": [
+                "document-2"
+              ],
+              "src_id": "ATLAS PILOT",
+              "target": "ATLAS PILOT",
+              "tgt_id": "HARBOR RESEARCH CENTER",
+              "weight": 9.0
+            },
+            {
+              "description": "Aurora Labs collaborates with the Harbor Research Center.",
+              "keywords": [
+                "collaboration, partnership"
+              ],
+              "source": "AURORA LABS",
+              "source_id": [
+                "document-2"
+              ],
+              "src_id": "AURORA LABS",
+              "target": "HARBOR RESEARCH CENTER",
+              "tgt_id": "HARBOR RESEARCH CENTER",
+              "weight": 8.0
+            },
+            {
+              "description": "The Atlas engineering team is the engineering team belonging to the Atlas project.",
+              "keywords": [
+                "team affiliation, project structure"
+              ],
+              "source": "ATLAS",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "ATLAS",
+              "target": "ATLAS ENGINEERING TEAM",
+              "tgt_id": "ATLAS ENGINEERING TEAM",
+              "weight": 8.0
+            },
+            {
+              "description": "Atlas is a research project focused on renewable energy forecasting.",
+              "keywords": [
+                "research focus, energy"
+              ],
+              "source": "ATLAS",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "ATLAS",
+              "target": "RENEWABLE ENERGY FORECASTING",
+              "tgt_id": "RENEWABLE ENERGY FORECASTING",
+              "weight": 8.0
+            },
+            {
+              "description": "The Atlas pilot is the pilot phase of the Atlas project, directly connecting it to the project led by Mira Chen.",
+              "keywords": [
+                "project pilot, testing phase"
+              ],
+              "source": "ATLAS",
+              "source_id": [
+                "document-2"
+              ],
+              "src_id": "ATLAS",
+              "target": "ATLAS PILOT",
+              "tgt_id": "ATLAS PILOT",
+              "weight": 8.0
+            },
+            {
+              "description": "Aurora Labs develops the Atlas project, whose engineering team is the Atlas engineering team, and Aurora Labs appointed Mira Chen who manages this team.",
+              "keywords": [
+                "organizational oversight, project structure"
+              ],
+              "source": "AURORA LABS",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "ATLAS ENGINEERING TEAM",
+              "target": "ATLAS ENGINEERING TEAM",
+              "tgt_id": "AURORA LABS",
+              "weight": 7.0
+            },
+            {
+              "description": "Aurora Labs develops Atlas, which is a research project for renewable energy forecasting, connecting the organization to this research area.",
+              "keywords": [
+                "research domain, organizational activity"
+              ],
+              "source": "AURORA LABS",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "AURORA LABS",
+              "target": "RENEWABLE ENERGY FORECASTING",
+              "tgt_id": "RENEWABLE ENERGY FORECASTING",
+              "weight": 6.0
+            },
+            {
+              "description": "Mira Chen leads the Atlas project, which is a research project for renewable energy forecasting, linking her leadership role to this research area.",
+              "keywords": [
+                "research leadership, project focus"
+              ],
+              "source": "MIRA CHEN",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "MIRA CHEN",
+              "target": "RENEWABLE ENERGY FORECASTING",
+              "tgt_id": "RENEWABLE ENERGY FORECASTING",
+              "weight": 6.0
+            },
+            {
+              "description": "The Atlas engineering team is the engineering team of the Atlas project, which is a research project for renewable energy forecasting.",
+              "keywords": [
+                "engineering work, research focus"
+              ],
+              "source": "ATLAS ENGINEERING TEAM",
+              "source_id": [
+                "document-1"
+              ],
+              "src_id": "ATLAS ENGINEERING TEAM",
+              "target": "RENEWABLE ENERGY FORECASTING",
+              "tgt_id": "RENEWABLE ENERGY FORECASTING",
+              "weight": 6.0
+            }
+          ],
+          "graph": {
+            "source_id": [
+              "document-1",
+              "document-2"
+            ]
+          },
+          "multigraph": false,
+          "nodes": [
+            {
+              "description": "Atlas is a research project for renewable energy forecasting, developed by Aurora Labs and led by Mira Chen.<SEP>Atlas is a project led by Mira Chen for Aurora Labs. It is tested at the Harbor Research Center in Northport, and the Harbor Research Center hosts the Atlas pilot.",
+              "entity_name": "ATLAS",
+              "entity_type": "CATEGORY",
+              "id": "ATLAS",
+              "pagerank": 0.21532943914669686,
+              "rank": 6,
+              "source_id": [
+                "document-1",
+                "document-2"
+              ]
+            },
+            {
+              "description": "Aurora Labs is an organization that develops the Atlas project and appointed Mira Chen as the leader of Atlas.<SEP>Aurora Labs is the organization for which Mira Chen leads the Atlas project. It collaborates with the Harbor Research Center.",
+              "entity_name": "AURORA LABS",
+              "entity_type": "ORGANIZATION",
+              "id": "AURORA LABS",
+              "pagerank": 0.17092973475371373,
+              "rank": 5,
+              "source_id": [
+                "document-1",
+                "document-2"
+              ]
+            },
+            {
+              "description": "Mira Chen is a person appointed by Aurora Labs as the leader of Atlas, and she manages the Atlas engineering team.<SEP>Mira Chen is the person who leads the Atlas project for Aurora Labs.",
+              "entity_name": "MIRA CHEN",
+              "entity_type": "PERSON",
+              "id": "MIRA CHEN",
+              "pagerank": 0.15090945011977483,
+              "rank": 4,
+              "source_id": [
+                "document-1",
+                "document-2"
+              ]
+            },
+            {
+              "description": "The Harbor Research Center is an organization located in Northport where the Atlas project is tested. It hosts the Atlas pilot and collaborates with Aurora Labs.",
+              "entity_name": "HARBOR RESEARCH CENTER",
+              "entity_type": "ORGANIZATION",
+              "id": "HARBOR RESEARCH CENTER",
+              "pagerank": 0.1376857016459132,
+              "rank": 4,
+              "source_id": [
+                "document-2"
+              ]
+            },
+            {
+              "description": "The Atlas engineering team is the engineering team of the Atlas project, managed by Mira Chen.",
+              "entity_name": "ATLAS ENGINEERING TEAM",
+              "entity_type": "ORGANIZATION",
+              "id": "ATLAS ENGINEERING TEAM",
+              "pagerank": 0.09893954256709761,
+              "rank": 4,
+              "source_id": [
+                "document-1"
+              ]
+            },
+            {
+              "description": "Renewable energy forecasting is the research focus of the Atlas project.",
+              "entity_name": "RENEWABLE ENERGY FORECASTING",
+              "entity_type": "CATEGORY",
+              "id": "RENEWABLE ENERGY FORECASTING",
+              "pagerank": 0.08800219580179772,
+              "rank": 4,
+              "source_id": [
+                "document-1"
+              ]
+            },
+            {
+              "description": "The Atlas pilot is a pilot program associated with the Atlas project. It is hosted by the Harbor Research Center in Northport.",
+              "entity_name": "ATLAS PILOT",
+              "entity_type": "EVENT",
+              "id": "ATLAS PILOT",
+              "pagerank": 0.06888446356464759,
+              "rank": 2,
+              "source_id": [
+                "document-2"
+              ]
+            },
+            {
+              "description": "Northport is the geographic location where the Harbor Research Center is situated.",
+              "entity_name": "NORTHPORT",
+              "entity_type": "GEO",
+              "id": "NORTHPORT",
+              "pagerank": 0.05091456442489821,
+              "rank": 1,
+              "source_id": [
+                "document-2"
+              ]
+            },
+            {
+              "description": "The text states that it is a fictional acceptance fixture, indicating the document content is fictional and serves as a fixture for acceptance purposes.",
+              "entity_name": "FICTIONAL ACCEPTANCE FIXTURE",
+              "entity_type": "CATEGORY",
+              "id": "FICTIONAL ACCEPTANCE FIXTURE",
+              "pagerank": 0.018404907975460127,
+              "rank": 0,
+              "source_id": [
+                "document-1"
+              ]
+            }
+          ]
+        },
+        "mind_map": {}
+      }
+    },
+    "elapsed_ms": 16.0
+  },
+  "known_empty_kg": {
+    "method": "POST",
+    "path": "/api/v1/retrieval",
+    "query": {},
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {
+        "chunks": [
+          {
+            "content": "\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+            "content_ltks": "mira chen lead the atlas project for aurora lab atlas is test at the harbor research center in northport the harbor research center host the atlas pilot aurora lab collabor with the harbor research center all name are synthet",
+            "dataset_id": "dataset-a",
+            "doc_type_kwd": "",
+            "document_id": "document-2",
+            "document_keyword": "f004b3be-fb86-4d95-badc-6fc4395fb1e6-atlas-pilot.txt",
+            "id": "67f90dfbd6dfbcfe",
+            "image_id": "",
+            "important_keywords": [],
+            "mom_id": "",
+            "positions": [
+              [
+                2,
+                1,
+                1,
+                1,
+                1
+              ]
+            ],
+            "row_id": null,
+            "similarity": 0.33674109191087565,
+            "tag_kwd": [],
+            "term_similarity": 0.10907768844410812,
+            "vector_similarity": 0.8679557
+          },
+          {
+            "content": "\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+            "content_ltks": "aurora lab develop the atlas project atlas is a research project for renew energi forecast aurora lab appoint mira chen a the leader of atlas mira chen manag the atlas engin team this is a fiction accept fixtur",
+            "dataset_id": "dataset-a",
+            "doc_type_kwd": "",
+            "document_id": "document-1",
+            "document_keyword": "6ff1a5b0-5d95-4499-b828-ac073ffe8431-aurora-atlas.txt",
+            "id": "46a755b87df08239",
+            "image_id": "",
+            "important_keywords": [],
+            "mom_id": "",
+            "positions": [
+              [
+                2,
+                1,
+                1,
+                1,
+                1
+              ]
+            ],
+            "row_id": null,
+            "similarity": 0.3254027117763481,
+            "tag_kwd": [],
+            "term_similarity": 0.09695794539478297,
+            "vector_similarity": 0.8584405
+          }
+        ],
+        "doc_aggs": [
+          {
+            "count": 1,
+            "doc_id": "document-2",
+            "doc_name": "f004b3be-fb86-4d95-badc-6fc4395fb1e6-atlas-pilot.txt"
+          },
+          {
+            "count": 1,
+            "doc_id": "document-1",
+            "doc_name": "6ff1a5b0-5d95-4499-b828-ac073ffe8431-aurora-atlas.txt"
+          }
+        ],
+        "total": 2
+      }
+    },
+    "elapsed_ms": 71015.0
+  }
+}

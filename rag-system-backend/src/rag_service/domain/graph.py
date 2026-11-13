@@ -14,6 +14,9 @@ from uuid import UUID
 
 from rag_service.domain.models import utc_now
 
+# 固定 v0.26.4 通过官方图结构做有界导航；与原生 use_kg 聚合模式区分缓存和诊断。
+NATIVE_GRAPH_QUERY_MODE = "native_graph_read_v1"
+
 
 class GraphStatus(StrEnum):
     """图谱配置、构建、失效和取消的对外生命周期；失败不能伪装为可用。"""
@@ -202,5 +205,5 @@ class GraphPort(Protocol):
         *,
         limit: int = 8,
     ) -> GraphNavigation:
-        """调用原生 KG 获取有限导航；不把无文档 ID 的生成摘要映射成普通块。"""
+        """从原生图结构获取受控实体导航；描述、聚合及关系均不作为原文引用。"""
         ...

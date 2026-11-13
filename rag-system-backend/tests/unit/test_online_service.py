@@ -2435,7 +2435,7 @@ async def test_native_graph_navigates_once_then_retrieves_original_sources(
     assert graph_queries[0].security.security_scope_id == knowledge_base.security_scope_id
     assert "ragflow:graph" in result.retrieval_routes
     assert result.candidates[0].content == "这是最小非业务合成证据。"
-    assert result.graph_mode == "native" and result.graph_cacheable
+    assert result.graph_mode == "native_graph_read_v1" and result.graph_cacheable
     assert result.graph_query_count == 1
     assert result.graph_source_candidate_count == 1
     assert result.graph_generations == {str(knowledge_base.id): 2}
@@ -2464,7 +2464,7 @@ async def test_native_graph_bypasses_filters_that_upstream_does_not_honor(
     assert not any(query.question == "native_unique_entity" for query in engine.queries)
     expected = "metadata_filter" if restriction == "metadata" else "document_filter"
     assert f"native_graph_bypassed_{expected}" in result.warnings
-    assert result.graph_mode != "native"
+    assert result.graph_mode != "native_graph_read_v1"
 
 
 @pytest.mark.parametrize("condition", ["disabled", "retrieval_disabled", "building", "stale"])
@@ -2571,7 +2571,7 @@ async def test_native_graph_state_transitions_isolate_answer_caches(
 async def test_native_graph_success_can_hit_cache_without_repeat_model_navigation(
     service_settings: ServiceSettings,
 ) -> None:
-    """边界不变且来源复核成功可命中缓存，缓存检查不再次调用收费图谱导航。"""
+    """边界不变且来源复核成功可命中缓存，缓存检查不重复图结构导航。"""
     cache = FakeCache()
     service, _, _, knowledge_base, _ = _service(
         service_settings,
@@ -2584,7 +2584,27 @@ async def test_native_graph_success_can_hit_cache_without_repeat_model_navigatio
     second = await service.answer(_security(), value)
     assert second.cache_type == "exact"
     assert len(graph.snapshot_calls) == 2 and len(graph.navigation_calls) == 1
-    assert cache.puts[0].boundary.graph_mode == "native"
+    assert cache.puts[0].boundary.graph_mode == "native_graph_read_v1"
+
+
+async def test_structural_graph_mode_rejects_previous_kg_exact_and_semantic_cache(
+    service_settings: ServiceSettings,
+) -> None:
+    """同一内容/图代数下，旧 KG 模式答案也不能遮蔽新结构导航的真实结果。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=["初次合成答案 [C1]", "重新检索答案 [C1]"], cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    assert cache.entry is not None
+    # 即使缓存层意外返回历史语义条目，应用仍须拒绝不同的实际导航模式。
+    old = replace(cache.entry, boundary=replace(cache.entry.boundary, graph_mode="native"))
+    cache.entry = cache.semantic_entry = old
+    result = await service.answer(_security(), value)
+    assert result.cache_type == "none" and len(graph.navigation_calls) == 2
+    assert len(cache.puts) == 2 and cache.puts[-1].boundary.graph_mode == "native_graph_read_v1"
 
 
 async def test_native_graph_stream_timeout_does_not_cache_degraded_answer(
