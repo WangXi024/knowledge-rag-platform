@@ -10,16 +10,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import time
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
+
+import anyio
 
 from rag_service.application.access import (
     KnowledgeBaseAccessPolicy,
@@ -81,6 +84,9 @@ _CITATION_REPAIR_PROMPT_PROFILE = "citation-repair-localized@1"
 # 图谱为可选增强，限制整条结构导航预算，避免多知识库请求放大引擎调用和等待时间。
 _NATIVE_GRAPH_MAX_KBS = 2
 _NATIVE_GRAPH_TIMEOUT_SECONDS = 8.0
+# 断连收尾只保留很短的本地提交/关闭预算；不能因云端或存储异常无限占用请求。
+_STREAM_CLEANUP_TIMEOUT_SECONDS = 3.0
+logger = logging.getLogger(__name__)
 _RESPONSE_LANGUAGE_NAMES = {
     "zh-CN": "Simplified Chinese (简体中文)",
     "en-US": "English",
@@ -102,6 +108,21 @@ _LEGACY_RRF_CONFIGURATION: dict[str, Any] = {
     "secondary_term_weight": 1.0,
     "unknown_term_weight": 1.0,
 }
+
+
+async def _close_answer_stream(stream: AsyncIterator[object]) -> None:
+    """有界关闭一层答案迭代器，屏蔽 Web 服务器已经触发的持续取消。
+
+    async-for 不会在调用方停在 yield 时自动关闭内部生成器，因此必须逐层传递关闭。
+    普通 AsyncIterator 可以没有 aclose；此函数不创建后台任务，不留未等待的模型调用。
+    """
+    close: Callable[[], Awaitable[None]] | None = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    with anyio.move_on_after(_STREAM_CLEANUP_TIMEOUT_SECONDS, shield=True) as cleanup:
+        await close()
+    if cleanup.cancel_called:
+        logger.warning("answer_stream_cleanup_timeout")
 
 
 def _elapsed_ms(started_at: float) -> float:
@@ -933,11 +954,19 @@ class OnlineService:
         security: SecurityContext,
         value: AnswerInput,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """执行带审计的流式问答，并逐步产出状态/文本/引用/完成事件。"""
+        """执行带审计的流式问答，断连关闭与任务取消都保存 CANCELLED。
+
+        HTTP 可能刚发送 accepted 就关闭生成器，此时收到的是 GeneratorExit 而非
+        CancelledError。两条路径均屏蔽外层持续取消、有界提交审计，再关闭内部生成器。
+        """
         _response_language_name(value.response_language)
+        stream = self._stream_with_deadline(security, value)
         if self._queries is None:
-            async for event in self._stream_with_deadline(security, value):
-                yield event
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await _close_answer_stream(stream)
             return
         normalized = normalize_query(value.query, self._app_settings.max_query_chars)
         record = QueryRecord(
@@ -957,8 +986,33 @@ class OnlineService:
         answer_parts: list[str] = []
         citations: list[Citation] = []
         cache_type = "none"
+        terminal_saved = False
+
+        async def save_completed(repository: QueryRepository) -> None:
+            """先保存真实引用再提交审计终态，之后才允许把 completed 帧发送给客户端。
+
+            客户端可以在终态帧后立即关闭连接，因此不能依赖下一次迭代才写 COMPLETED。
+            引用写入失败时不会发布成功终态，正常异常流程会保存 FAILED。
+            """
+            nonlocal terminal_saved
+            record.cache_status = {
+                "none": "MISS",
+                "exact": "EXACT_HIT",
+                "semantic": "SEMANTIC_HIT",
+            }.get(cache_type, "BYPASS")
+            record.answer_text = "".join(answer_parts) or (
+                _no_evidence_answer(value.response_language)
+                if record.outcome == AnswerOutcome.NO_EVIDENCE
+                else None
+            )
+            record.completed_at = datetime.now(UTC)
+            await repository.add_citations(security.security_scope_id, value.request_id, citations)
+            record.request_status = QueryStatus.COMPLETED
+            await repository.update(security.security_scope_id, record)
+            terminal_saved = True
+
         try:
-            async for event in self._stream_with_deadline(security, value):
+            async for event in stream:
                 current = await self._queries.get(
                     security.security_scope_id,
                     value.request_id,
@@ -1004,12 +1058,35 @@ class OnlineService:
                             for key, value in timings.items()
                             if isinstance(value, int | float)
                         }
+                    await save_completed(self._queries)
                 yield event
-        except asyncio.CancelledError:
-            record.request_status = QueryStatus.CANCELLED
-            record.outcome = AnswerOutcome.CANCELLED
-            record.completed_at = datetime.now(UTC)
-            await self._queries.update(security.security_scope_id, record)
+        except (asyncio.CancelledError, GeneratorExit):
+            # Starlette 的取消作用域仍然生效；未经屏蔽的数据库 await 会再次被取消，
+            # 导致真实请求永远停留 RUNNING。直接等待提交，不把审计扔到后台执行。
+            logger.debug("answer_stream_cancel_audit_started")
+            try:
+                with anyio.move_on_after(_STREAM_CLEANUP_TIMEOUT_SECONDS, shield=True) as cleanup:
+                    persisted = await self._queries.get(
+                        security.security_scope_id, value.request_id
+                    )
+                    # completed 已发出或其他流程已写终态时，迟到断连不能倒退成 CANCELLED。
+                    if persisted is None or persisted.request_status not in {
+                        QueryStatus.COMPLETED, QueryStatus.FAILED, QueryStatus.CANCELLED,
+                    }:
+                        record.request_status = QueryStatus.CANCELLED
+                        record.outcome = AnswerOutcome.CANCELLED
+                        record.completed_at = datetime.now(UTC)
+                        await self._queries.update(security.security_scope_id, record)
+                        logger.debug("answer_stream_cancel_audit_saved")
+                    else:
+                        logger.debug("answer_stream_cancel_preserved_terminal")
+            except Exception as error:
+                logger.warning(
+                    "answer_stream_cancel_audit_failed", extra={"error_type": type(error).__name__}
+                )
+                raise
+            if cleanup.cancel_called:
+                logger.warning("answer_stream_cancel_audit_timeout")
             raise
         except RagError as error:
             record.request_status = QueryStatus.FAILED
@@ -1023,37 +1100,27 @@ class OnlineService:
             record.completed_at = datetime.now(UTC)
             await self._queries.update(security.security_scope_id, record)
             raise
-        record.request_status = QueryStatus.COMPLETED
-        record.cache_status = {
-            "none": "MISS",
-            "exact": "EXACT_HIT",
-            "semantic": "SEMANTIC_HIT",
-        }.get(cache_type, "BYPASS")
-        record.answer_text = "".join(answer_parts) or (
-            _no_evidence_answer(value.response_language)
-            if record.outcome == AnswerOutcome.NO_EVIDENCE
-            else None
-        )
-        record.completed_at = datetime.now(UTC)
-        await self._queries.update(security.security_scope_id, record)
-        await self._queries.add_citations(
-            security.security_scope_id,
-            value.request_id,
-            citations,
-        )
+        finally:
+            # 向 deadline、正文生成和模型响应逐层传递关闭，避免停在 yield 的模型流孤悬。
+            await _close_answer_stream(stream)
+        if not terminal_saved:
+            await save_completed(self._queries)
 
     async def _stream_with_deadline(
         self,
         security: SecurityContext,
         value: AnswerInput,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """为整个异步事件生成器施加总时限，并把超时转换为稳定错误。"""
+        """为整条流施加总时限；结束或关闭时显式关闭内部生成器，不依赖垃圾回收。"""
+        stream = self._stream_answer_impl(security, value)
         try:
             async with asyncio.timeout(self._answer_settings.request_deadline_seconds):
-                async for event in self._stream_answer_impl(security, value):
+                async for event in stream:
                     yield event
         except TimeoutError as exc:
             raise LlmError.timeout() from exc
+        finally:
+            await _close_answer_stream(stream)
 
     async def _stream_answer_impl(
         self,
@@ -1063,7 +1130,7 @@ class OnlineService:
         """流式版问答实现，复用缓存/检索规则并累积模型增量。
 
         模型 Token 到达时立即发 ``delta``；完整文本结束后才校验引用并发 ``citation``。
-        因此客户端看到的最终 ``done`` 事件才代表答案和引用均已确认并可审计。
+        最终 ``completed`` 才代表答案和引用均已确认；关闭本生成器会同步关闭模型流。
         """
         started_at = time.perf_counter()
         timings: dict[str, float] = {}
@@ -1232,12 +1299,18 @@ class OnlineService:
         answer_parts: list[str] = []
         usage: LlmUsage | None = None
         generation_started_at = time.perf_counter()
-        async for item in self._llm.stream(request):
-            if item.delta:
-                answer_parts.append(item.delta)
-                yield StreamEvent("answer.delta", {"delta": item.delta})
-            if item.usage is not None:
-                usage = item.usage
+        model_stream = self._llm.stream(request)
+        try:
+            async for item in model_stream:
+                if item.delta:
+                    answer_parts.append(item.delta)
+                    yield StreamEvent("answer.delta", {"delta": item.delta})
+                if item.usage is not None:
+                    usage = item.usage
+        finally:
+            # 调用方关闭答案生成器时，async-for 不会替我们关闭停在 delta 的模型迭代器。
+            # 显式关闭让适配器及时释放云端 HTTP 响应；不承诺供应商已停止计算或计费。
+            await _close_answer_stream(model_stream)
         timings["generation_ms"] = _elapsed_ms(generation_started_at)
         answer = "".join(answer_parts)
         citation_started_at = time.perf_counter()

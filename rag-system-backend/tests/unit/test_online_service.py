@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
+from starlette.types import Message, Scope
 
+from rag_service.api.online_routes import _ClosingStreamingResponse, _stream_sse_events
 from rag_service.application.online import (
     AnswerInput,
     HistoryMessage,
     OnlineService,
     RetrievalInput,
+    StreamEvent,
 )
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.errors import LlmError, ResourceNotFoundError
@@ -355,6 +359,45 @@ class CancellingSlowLlm(FakeLlm):
         raise AssertionError("slow LLM should have been cancelled")
 
 
+class ClosingStreamingLlm(FakeLlm):
+    """等待显式取消的流式模型端口，记录生产协程和异步关闭是否都已完成。
+
+    本替身只使用当前事件循环，不访问网络；用于证明真实响应断连会沿嵌套生成器传播，
+    而不是仅修改审计状态后把模型生成留成孤儿任务。
+    """
+
+    def __init__(self, *, emit_first_delta: bool = False) -> None:
+        """创建确定性断连信号；可先产出一帧，以覆盖消费者停在答案 yield 时的关闭。"""
+        super().__init__([])
+        self.emit_first_delta = emit_first_delta
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.cancelled = False
+        self.producer: asyncio.Task[object] | None = None
+
+    def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+        """返回真实异步生成器；只有调用者取消正在等待的下一项才会标记取消。"""
+        self.requests.append(request)
+
+        async def events() -> AsyncIterator[LlmEvent]:
+            """先通知已进入模型，再无限等待；收尾必须跨检查点完成资源释放。"""
+            self.producer = asyncio.current_task()
+            self.started.set()
+            try:
+                if self.emit_first_delta:
+                    yield LlmEvent(delta="合成事实")
+                await anyio.sleep_forever()
+                yield LlmEvent(delta="unreachable")
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            finally:
+                await anyio.lowlevel.checkpoint()
+                self.closed.set()
+
+        return events()
+
+
 class FakeCache:
     def __init__(self) -> None:
         self.entry: CacheEntry | None = None
@@ -463,6 +506,38 @@ class MemoryQueries:
     ) -> None:
         assert value.security_scope_id == security_scope_id
         self.feedback.append(value)
+
+
+class SnapshotQueries(MemoryQueries):
+    """用独立快照和真实 AnyIO 检查点模拟短事务审计，防止取消测试误把内存修改当提交。
+
+    共享同一 QueryRecord 引用会使未完成的 CANCELLED 写入也看似成功；本实现只有经过
+    异步检查点的 update 才保存副本，使未屏蔽外层取消的错误逻辑稳定失败。
+    """
+
+    def __init__(self) -> None:
+        """保留已有仓库行为，并单独记录真正完成持久化步骤的状态。"""
+        super().__init__()
+        self.persisted_statuses: list[QueryStatus] = []
+
+    async def add(self, security_scope_id: str, value: QueryRecord) -> None:
+        """在可取消检查点之后保存副本，模拟数据库独立事务完成的边界。"""
+        await anyio.lowlevel.checkpoint()
+        await super().add(security_scope_id, replace(value))
+
+    async def get(self, security_scope_id: str, request_id: UUID) -> QueryRecord | None:
+        """通过真实检查点读取副本，使取消中的终态回读也必须受到 shield 保护。"""
+        await anyio.lowlevel.checkpoint()
+        value = await super().get(security_scope_id, request_id)
+        return replace(value) if value is not None else None
+
+    async def update(self, security_scope_id: str, value: QueryRecord) -> bool:
+        """只有检查点成功通过才记录提交，取消中的 shield 缺失不能靠共享引用假通过。"""
+        await anyio.lowlevel.checkpoint()
+        updated = await super().update(security_scope_id, replace(value))
+        if updated:
+            self.persisted_statuses.append(value.request_status)
+        return updated
 
 
 class MemoryNativeGraphStates:
@@ -2486,6 +2561,348 @@ async def test_stream_query_record_and_cancel_are_scope_qualified(
     assert cancelled.request_status == QueryStatus.CANCELLED
     with pytest.raises(ResourceNotFoundError):
         await service.cancel_request(_security("other"), cancel_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_scope", [False, True])
+async def test_stream_aclose_after_accepted_persists_cancelled_snapshot(
+    service_settings: ServiceSettings,
+    cancelled_scope: bool,
+) -> None:
+    """accepted 后直接关闭会抛 GeneratorExit；普通和已取消作用域都必须提交 CANCELLED。"""
+    queries = SnapshotQueries()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="accepted close audit fixture",
+        ),
+    )
+    assert (await anext(stream)).event == "accepted"
+
+    # 先取消 AnyIO 再关闭，迫使审计写入经过受保护的异步检查点，而非同步内存赋值。
+    with anyio.CancelScope() as outer:
+        if cancelled_scope:
+            outer.cancel()
+        await stream.aclose()
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert record is not None
+    assert record.request_status == QueryStatus.CANCELLED
+    assert record.outcome == AnswerOutcome.CANCELLED
+    assert record.completed_at is not None
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, QueryStatus.CANCELLED]
+    assert queries.citations == {}
+    assert llm.requests == []
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_audit", [False, True])
+async def test_stream_aclose_after_first_delta_closes_nested_model_generator(
+    service_settings: ServiceSettings,
+    with_audit: bool,
+) -> None:
+    """消费者停在首个答案 yield 时，关闭必须穿过 deadline/impl 立即释放模型迭代器。"""
+    queries = SnapshotQueries() if with_audit else None
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm(emit_first_delta=True)
+    service._llm = llm
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="first delta close nested iterator fixture",
+        ),
+    )
+    try:
+        async with asyncio.timeout(2):
+            async for event in stream:
+                if event.event == "answer.delta":
+                    break
+    finally:
+        await stream.aclose()
+
+    assert llm.started.is_set()
+    assert llm.closed.is_set()
+    assert llm.producer is asyncio.current_task()
+    assert stream.ag_frame is None
+    if queries is not None:
+        record = await queries.get(_security().security_scope_id, request_id)
+        assert record is not None
+        assert record.request_status == QueryStatus.CANCELLED
+        assert record.outcome == AnswerOutcome.CANCELLED
+        assert QueryStatus.COMPLETED not in queries.persisted_statuses
+        assert queries.citations == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_aclose_immediately_after_completed_keeps_success_and_citations(
+    service_settings: ServiceSettings,
+) -> None:
+    """客户端收到 completed 就断开时，成功审计和真实引用应已提交，不能倒退为取消。"""
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, document = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="close after completed persisted citations fixture",
+        ),
+    )
+    reached_completed = False
+    published: QueryRecord | None = None
+    published_citations: tuple[Citation, ...] = ()
+    try:
+        async with asyncio.timeout(2):
+            async for event in stream:
+                if event.event == "completed":
+                    assert event.data["outcome"] == "success"
+                    # completed 是已发布承诺：消费者尚未继续迭代时，数据库快照也必须完成。
+                    published = await queries.get(_security().security_scope_id, request_id)
+                    published_citations = await queries.list_citations(
+                        _security().security_scope_id, request_id,
+                    )
+                    assert published is not None
+                    assert published.request_status == QueryStatus.COMPLETED
+                    assert published.outcome == AnswerOutcome.SUCCESS
+                    assert len(published_citations) == 1
+                    reached_completed = True
+                    break
+    finally:
+        # 同时模拟已取消的响应作用域；取消清理必须尊重已经发布的持久终态。
+        with anyio.CancelScope() as cancelled:
+            cancelled.cancel()
+            await stream.aclose()
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    citations = await queries.list_citations(_security().security_scope_id, request_id)
+    assert reached_completed
+    assert record is not None
+    assert record.request_status == QueryStatus.COMPLETED
+    assert record.outcome == AnswerOutcome.SUCCESS
+    assert record.answer_text == "合成事实 [C1]"
+    assert record.completed_at is not None
+    assert record == published
+    assert citations == published_citations
+    assert QueryStatus.CANCELLED not in queries.persisted_statuses
+    assert queries.persisted_statuses.count(QueryStatus.COMPLETED) == 1
+    assert len(citations) == 1
+    assert citations[0].knowledge_base_id == knowledge_base.id
+    assert citations[0].document_id == document.id
+    assert citations[0].quote == "这是最小非业务合成证据。"
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [QueryStatus.FAILED, QueryStatus.COMPLETED])
+async def test_stream_aclose_preserves_independently_persisted_terminal_audit(
+    service_settings: ServiceSettings,
+    terminal: QueryStatus,
+) -> None:
+    """收尾期间必须受保护地回读已提交终态，不能用旧 RUNNING 副本覆盖 FAILED/COMPLETED。"""
+    queries = SnapshotQueries()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="preserve externally persisted terminal audit fixture",
+        ),
+    )
+    assert (await anext(stream)).event == "accepted"
+    committed = await queries.get(_security().security_scope_id, request_id)
+    assert committed is not None
+    committed.request_status = terminal
+    committed.outcome = (
+        AnswerOutcome.SUCCESS if terminal == QueryStatus.COMPLETED else AnswerOutcome.REFUSED
+    )
+    committed.answer_text = "已保存的终态内容"
+    committed.error_code = "RAG-LLM-001" if terminal == QueryStatus.FAILED else None
+    committed.completed_at = datetime.now(UTC)
+    await queries.update(_security().security_scope_id, committed)
+    expected = replace(committed)
+
+    with anyio.CancelScope() as cancelled:
+        cancelled.cancel()
+        await stream.aclose()
+
+    actual = await queries.get(_security().security_scope_id, request_id)
+    assert actual == expected
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, terminal]
+    assert queries.citations == {}
+    assert llm.requests == []
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect_at_accepted", [True, False])
+async def test_streaming_response_anyio_disconnect_closes_source_and_commits_cancellation(
+    service_settings: ServiceSettings,
+    disconnect_at_accepted: bool,
+) -> None:
+    """真实 StreamingResponse 的 AnyIO 取消同时覆盖发送 accepted 和等待模型两个断点。
+
+    前者停在 HTTP 发送 accepted，后者已有持久生产者等待模型。两者都必须同步等待
+    原 Task 关闭嵌套生成器，经过可取消检查点提交独立审计副本，并禁止发布 COMPLETED。
+    """
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm()
+    service._llm = llm
+    request_id = uuid4()
+    source = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="real response disconnect cancellation fixture",
+        ),
+    )
+    accepted_sent = asyncio.Event()
+    bodies: list[bytes] = []
+
+    async def connected() -> bool:
+        """断连由真实响应的 receive 监听处理，不提前替应用伪造断开检查结果。"""
+        return False
+
+    async def receive() -> Message:
+        """在指定断点回送 ASGI 断连，让 Starlette 自己取消发送任务的 AnyIO 作用域。"""
+        await (accepted_sent.wait() if disconnect_at_accepted else llm.started.wait())
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        """accepted 发送中暂停以重现背压；另一路允许持久生产者进入模型等待。"""
+        if message["type"] == "http.response.body":
+            body = message.get("body", b"")
+            bodies.append(body)
+            if b"event: accepted\n" in body:
+                accepted_sent.set()
+                if disconnect_at_accepted:
+                    await anyio.sleep_forever()
+        await anyio.lowlevel.checkpoint()
+
+    framed = _stream_sse_events(
+        stream=source,
+        request_id=request_id,
+        heartbeat_seconds=1,
+        disconnected=connected,
+    )
+    response = _ClosingStreamingResponse(framed, media_type="text/event-stream")
+    # ASGI 2.3 分支由 StreamingResponse 使用真实 AnyIO TaskGroup 监听 http.disconnect。
+    scope: Scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+    with anyio.fail_after(2):
+        await response(scope, receive, send)
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert accepted_sent.is_set()
+    assert record is not None
+    assert record.request_status == QueryStatus.CANCELLED
+    assert record.outcome == AnswerOutcome.CANCELLED
+    assert record.completed_at is not None
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, QueryStatus.CANCELLED]
+    assert queries.citations == {}
+    assert not any(b"event: completed\n" in body for body in bodies)
+    assert source.ag_frame is None
+    assert getattr(framed, "ag_frame", None) is None
+    # 单元素队列允许有限预取，accepted 交付时模型可能已启动；启动过就必须结束。
+    if llm.started.is_set():
+        assert llm.started.is_set()
+        assert llm.cancelled is True
+        assert llm.closed.is_set()
+        assert llm.producer is not None and llm.producer.done()
+    else:
+        assert disconnect_at_accepted
+        assert llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_service_deadline_stays_with_one_producer(
+    service_settings: ServiceSettings,
+) -> None:
+    """真实响应跨多帧后，Service 总截止时间仍取消模型并保存 FAILED，不留下生产任务。
+
+    逐帧创建 anext Task 会把 asyncio.timeout 留在已结束的首个 Task；本场景必须在
+    有界时间看到 RAG-LLM-002，而非仅靠测试外层超时终止看似正常的流。
+    """
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm()
+    service._llm = llm
+    service._answer_settings = AnswersSection(request_deadline_seconds=1)
+    request_id = uuid4()
+    service_stream = service.stream_answer(
+        _security(), AnswerInput(request_id=request_id, knowledge_base_ids=(knowledge_base.id,),
+                                 query="persistent producer deadline fixture"),
+    )
+    owners: list[asyncio.Task[object] | None] = []
+    bodies: list[bytes] = []
+
+    async def source() -> AsyncGenerator[StreamEvent, None]:
+        """记录迭代及关闭的 Task，且显式关闭内部 Service，不把测试自身变成泄漏来源。"""
+        try:
+            async for event in service_stream:
+                owners.append(asyncio.current_task())
+                yield event
+        finally:
+            owners.append(asyncio.current_task())
+            await service_stream.aclose()
+
+    async def connected() -> bool:
+        """保持连接；错误必须来自 Service 的真实总截止时间。"""
+        return False
+
+    async def receive() -> Message:
+        """保持 HTTP 接收端打开，由响应正常结束取消监听，不主动发送断连。"""
+        await anyio.sleep_forever()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        """仅记录真实 StreamingResponse 发出的帧，不修改事件或生产者调度。"""
+        if message["type"] == "http.response.body":
+            bodies.append(message.get("body", b""))
+        await anyio.lowlevel.checkpoint()
+
+    framed = _stream_sse_events(stream=source(), request_id=request_id,
+                               heartbeat_seconds=0.05, disconnected=connected)
+    response = _ClosingStreamingResponse(framed, media_type="text/event-stream")
+    scope: Scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+    with anyio.fail_after(3):
+        await response(scope, receive, send)
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert any(b"event: accepted\n" in body for body in bodies)
+    assert any(b'"code":"RAG-LLM-002"' in body for body in bodies)
+    assert not any(b"event: completed\n" in body for body in bodies)
+    assert record is not None and record.request_status == QueryStatus.FAILED
+    assert record.error_code == "RAG-LLM-002"
+    assert QueryStatus.COMPLETED not in queries.persisted_statuses
+    assert QueryStatus.CANCELLED not in queries.persisted_statuses
+    assert llm.cancelled and llm.closed.is_set()
+    assert llm.producer is not None and llm.producer.done()
+    assert owners and all(owner is llm.producer for owner in owners)
+    assert service_stream.ag_frame is None
 
 
 async def test_native_graph_navigates_once_then_retrieves_original_sources(

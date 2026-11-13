@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -374,6 +375,93 @@ async def test_sse_disconnect_cancels_pending_source() -> None:
 
     assert events == []
     assert source_closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sse_aclose_after_accepted_finishes_source_inside_cancelled_scope() -> None:
+    """accepted 已交付后关闭，必须取消并等待唯一生产者在原 Task 内完成源收尾。"""
+    source_closed = asyncio.Event()
+    producers: list[asyncio.Task[object]] = []
+
+    async def source() -> AsyncGenerator[StreamEvent, None]:
+        """用真实可取消检查点代表关闭 HTTP/数据库资源，不能只执行同步 finally 假通过。"""
+        producer = asyncio.current_task()
+        assert producer is not None
+        producers.append(producer)
+        try:
+            yield StreamEvent("accepted")
+            await anyio.sleep_forever()
+        finally:
+            await anyio.lowlevel.checkpoint()
+            source_closed.set()
+
+    async def connected() -> bool:
+        """源迭代器尚未主动报告断开；本场景直接从消费者关闭入口触发清理。"""
+        return False
+
+    source_stream = source()
+    framed = _stream_sse_events(
+        stream=source_stream,
+        request_id=uuid4(),
+        heartbeat_seconds=1,
+        disconnected=connected,
+    )
+    first = await anext(framed)
+    assert "event: accepted" in first
+    # 模拟 Starlette 发送 accepted 帧时外层 AnyIO 作用域已经取消的真实收尾环境。
+    with anyio.CancelScope() as cancelled:
+        cancelled.cancel()
+        await framed.aclose()
+
+    assert source_closed.is_set()
+    assert source_stream.ag_frame is None
+    assert getattr(framed, "ag_frame", None) is None
+    assert len(producers) == 1 and producers[0].done()
+
+
+@pytest.mark.asyncio
+async def test_sse_source_deadline_and_cleanup_keep_the_same_producer_task() -> None:
+    """多帧不会切换源生成器 Task，内部 asyncio.timeout 能取消后续等待并正常关闭。"""
+    owners: list[asyncio.Task[object] | None] = []
+    closed = asyncio.Event()
+
+    async def source() -> AsyncGenerator[StreamEvent, None]:
+        """跨多次 yield 保持 deadline 上下文；旧的逐事件 Task 会让定时器取消错误任务。"""
+        owners.append(asyncio.current_task())
+        try:
+            try:
+                async with asyncio.timeout(0.05):
+                    yield StreamEvent("accepted")
+                    owners.append(asyncio.current_task())
+                    yield StreamEvent("retrieval.started")
+                    owners.append(asyncio.current_task())
+                    await anyio.sleep_forever()
+            except TimeoutError as error:
+                owners.append(asyncio.current_task())
+                raise RagError("RAG-LLM-002", "模型超时", 504, True) from error
+        finally:
+            owners.append(asyncio.current_task())
+            await anyio.lowlevel.checkpoint()
+            closed.set()
+
+    async def connected() -> bool:
+        """不伪造断连；本场景必须由源自身 deadline 发出终态错误。"""
+        return False
+
+    with anyio.fail_after(2):
+        frames = [frame async for frame in _stream_sse_events(
+            stream=source(), request_id=uuid4(), heartbeat_seconds=0.01,
+            disconnected=connected,
+        )]
+
+    assert "event: accepted" in frames[0]
+    assert "event: error" in frames[-1]
+    assert '"code":"RAG-LLM-002"' in frames[-1]
+    assert closed.is_set()
+    assert owners[0] is not None
+    assert all(owner is owners[0] for owner in owners)
+    assert owners[0] is not asyncio.current_task()
+    assert owners[0].done()
 
 
 @pytest.mark.asyncio
