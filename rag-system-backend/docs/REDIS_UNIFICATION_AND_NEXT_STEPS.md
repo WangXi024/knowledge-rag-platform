@@ -1,6 +1,6 @@
 # Redis 统一部署、Celery 运行优化与后续策略
 
-更新时间：2026-08-20
+更新时间：2026-11-13
 
 ## 1. 本次已经完成什么
 
@@ -83,6 +83,18 @@ APP_REDIS_URL=redis://:<REDACTED>@redis-stack:6379/2
 
 RAGFlow 的模板把 DB 固定为 1。外部存储模式只需把 Host、Port 和密码改为外部 Redis
 Stack，三个逻辑 DB 的分工不变。
+
+### 4.1 答案缓存边界与 v3 索引
+
+答案缓存的精确键与语义检索现在共同包含规范化 Metadata Filter 的 SHA-256 摘要，
+相同问题使用不同过滤范围时不会复用答案；JSON 对象仅键顺序变化不会产生新边界。
+另外独立保留 `graph_version_hash` 和 `graph_mode`，供图谱发布版本与检索模式隔离。
+这两个字段的存在本身不代表原生图谱已启用；普通检索使用 `none` / `off`。
+
+默认语义索引升级为 `rag_semantic_cache_v3`，Hash 前缀为 `rag-cache:semantic:v3:`，
+Schema 版本为 3。Bootstrap 只创建这个新索引，并核验包含过滤/图谱维度在内的全部
+隔离 TAG；不会原地修改或删除 v1/v2 索引。自定义索引也必须使用新的版本名称、前缀
+及完整字段。旧缓存缺少新边界字段时按未命中处理，旧键依原有 TTL 自然过期。
 
 ## 5. 从旧拓扑切换
 

@@ -27,7 +27,7 @@ from rag_service.application.access import (
 )
 from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.profiles import ProfileCatalog
-from rag_service.domain.cache import cache_id, knowledge_base_revisions_hash
+from rag_service.domain.cache import cache_id, knowledge_base_revisions_hash, metadata_filter_hash
 from rag_service.domain.errors import LlmError, RagError, ResourceNotFoundError
 from rag_service.domain.models import (
     AnswerOutcome,
@@ -1376,8 +1376,16 @@ class OnlineService:
         security: SecurityContext,
         knowledge_bases: tuple[KnowledgeBase, ...],
         value: AnswerInput,
+        *,
+        graph_version_hash: str = "none",
+        graph_mode: str = "off",
     ) -> CacheBoundary:
-        """用租户、知识库修订、Profile、语言和对话历史构造答案缓存边界。"""
+        """用主体、内容版本、过滤条件和图谱状态构造同一问题的答案缓存边界。
+
+        ``value`` 的 Metadata 条件在首次读取精确/语义缓存前即参与摘要，防止缓存命中
+        绕过后续检索过滤。可选图谱参数由后续图谱编排传入可信版本；当前普通流程固定
+        使用 ``none/off``，不读取用户任意图谱状态。此纯函数不写库或调用外部服务。
+        """
         history = json.dumps(
             [{"role": item.role, "content": item.content} for item in value.messages],
             ensure_ascii=False,
@@ -1393,6 +1401,9 @@ class OnlineService:
             model_profile=value.generation_profile,
             language=value.response_language,
             history_hash=hashlib.sha256(history.encode("utf-8")).hexdigest(),
+            filter_hash=metadata_filter_hash(value.metadata_filter),
+            graph_version_hash=graph_version_hash,
+            graph_mode=graph_mode,
         )
 
     async def _cache_entry_valid(

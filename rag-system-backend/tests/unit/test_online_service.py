@@ -1983,6 +1983,96 @@ async def test_exact_cache_hit_revalidates_citation_and_skips_downstream(
     assert second.citations[0].citation_id != first.citations[0].citation_id
 
 
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_metadata_filter_isolates_answer_cache_for_json_and_sse(
+    service_settings: ServiceSettings,
+    semantic: bool,
+    streaming: bool,
+) -> None:
+    """同一主体改变 Metadata 范围时，JSON/SSE 都不能复用精确或语义旧答案。
+
+    引擎与 LLM 使用合成替身，仅核验缓存边界和是否重新检索生成；语义场景额外让
+    缓存替身返回旧范围的高相似答案，保证在线服务自己也执行完整边界验证。
+    """
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一范围答案 [C1]", "第二范围答案 [C1]"],
+        cache=cache,
+    )
+    value = AnswerInput(
+        knowledge_base_ids=(knowledge_base.id,),
+        query="filtered cache question",
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "department", "operator": "eq", "value": "first"}],
+        },
+    )
+    await service.answer(_security(), value)
+    if semantic:
+        cache.semantic_entry = cache.entry
+    changed = replace(
+        value,
+        query="similar filtered cache question" if semantic else value.query,
+        request_id=uuid4(),
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "department", "operator": "eq", "value": "second"}],
+        },
+    )
+
+    if streaming:
+        events = [event async for event in service.stream_answer(_security(), changed)]
+        assert events[-1].data["cache_type"] == "none"
+        assert events[-1].data["outcome"] == "success"
+    else:
+        result = await service.answer(_security(), changed)
+        assert result.cache_type == "none"
+        assert result.answer == "第二范围答案 [C1]"
+    assert len(llm.requests) == 2
+    assert len(engine.queries) == 4
+    assert len(cache.puts) == 2
+    assert cache.puts[0].boundary.filter_hash != cache.puts[1].boundary.filter_hash
+
+
+@pytest.mark.asyncio
+async def test_metadata_filter_json_key_order_does_not_split_answer_cache(
+    service_settings: ServiceSettings,
+) -> None:
+    """过滤对象仅 JSON 键顺序变化时复用同一答案，避免规范化缺失导致无效重复计算。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["相同范围答案 [C1]"],
+        cache=cache,
+    )
+    value = AnswerInput(
+        knowledge_base_ids=(knowledge_base.id,),
+        query="canonical filter question",
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "year", "operator": "eq", "value": 2026}],
+        },
+    )
+    first = await service.answer(_security(), value)
+    reordered = replace(
+        value,
+        request_id=uuid4(),
+        metadata_filter={
+            "conditions": [{"value": 2026, "operator": "eq", "field": "year"}],
+            "logic": "and",
+        },
+    )
+
+    replay = await service.answer(_security(), reordered)
+
+    assert replay.cache_type == "exact"
+    assert replay.answer == first.answer
+    assert len(llm.requests) == 1 and len(engine.queries) == 2
+
+
 @pytest.mark.asyncio
 async def test_cache_hit_is_not_served_when_ragflow_health_is_unavailable(
     service_settings: ServiceSettings,
