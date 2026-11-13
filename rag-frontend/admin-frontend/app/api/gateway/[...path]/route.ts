@@ -28,6 +28,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   if (!joinedPath.startsWith('v1/') && joinedPath !== 'health/live' && joinedPath !== 'health/ready') {
     return Response.json({ error: '不允许代理该路径' }, { status: 403 });
   }
+  // PUT 本期只用于受控知识库图谱配置，不能扩大为任意上游写入代理。
+  if (request.method === 'PUT' && !/^v1\/management\/knowledge-bases\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/graph\/configuration$/i.test(joinedPath)) {
+    return Response.json({ error: '不允许代理该 PUT 路径' }, { status: 403 });
+  }
 
   const requestUrl = new URL(request.url);
   const upstreamUrl = new URL(`/${joinedPath}${requestUrl.search}`, getGatewayBaseUrl());
@@ -61,5 +65,6 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
 
 export const GET = proxy;
 export const POST = proxy;
+export const PUT = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;

@@ -37,7 +37,7 @@ export async function gatewayRequest<T>(
   session: AdminSession,
   path: string,
   options: {
-    method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     body?: JsonObject | FormData;
     idempotent?: boolean;
   } = {},

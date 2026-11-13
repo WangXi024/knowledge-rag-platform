@@ -58,6 +58,8 @@ function workspace({ profiles = [], request } = {}) {
       };
       // 这里验证抽屉入口与参数，切块组件的异步查询由独立回归测试负责。
       if (name === '@/components/document-chunks') return { DocumentChunks: () => null };
+      // 上传选择测试不发起图谱请求，图谱组件有独立状态与代理边界用例。
+      if (name === '@/components/knowledge-graph-settings') return { KnowledgeGraphSettings: () => null };
       return require(name);
     },
   });
