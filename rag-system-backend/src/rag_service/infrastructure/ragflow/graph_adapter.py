@@ -12,6 +12,7 @@ import json
 import math
 import re
 import unicodedata
+from dataclasses import dataclass
 from http import HTTPStatus
 from io import StringIO
 from typing import Any
@@ -39,8 +40,8 @@ _GRAPH_TITLE = "Related content in Knowledge Graph"
 _PAGE_SIZE = 100
 _MAX_DOCUMENTS = 100_000
 _MAX_NAVIGATION_TERMS = 32
-_MAX_STRUCTURAL_NODES = 256
-_MAX_STRUCTURAL_EDGES = 1024
+_GRAPH_NODE_TRUNCATION_LIMIT = 256
+_GRAPH_EDGE_TRUNCATION_LIMIT = 128
 _MAX_STRUCTURAL_TERMS = 8
 _MAX_GRAPH_RESPONSE_BYTES = 4 * 1024 * 1024
 _GRAPH_SECTIONS = re.compile(r"^---- (Entities|Relations|Community Report) ----\s*$", re.M)
@@ -160,6 +161,24 @@ def _entity_matches(question: str, entity: str) -> bool:
     return re.search(f"{prefix}{re.escape(entity)}{suffix}", question) is not None
 
 
+@dataclass(frozen=True, slots=True)
+class _NativeGraphNode:
+    """已校验的原生实体；只保留名称及活动来源，不保存生成描述。"""
+
+    label: str
+    normalized_name: str
+    source_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeGraphStructure:
+    """完整验证之后的有限图，供发布快照和在线导航共享相同安全边界。"""
+
+    nodes: dict[str, _NativeGraphNode]
+    adjacent: dict[str, set[str]]
+    relation_count: int
+
+
 class RagFlowGraphAdapter:
     """实现隔离的原生图谱端口；客户端支持注入 MockTransport 做无网络契约验收。"""
 
@@ -237,7 +256,8 @@ class RagFlowGraphAdapter:
         其他 API 的 HTTP、超时和 Envelope 错误契约保持一致。
         """
         async with self._client.stream(
-            "GET", path,
+            "GET",
+            path,
             headers={
                 "Authorization": f"Bearer {self._settings.api_key}",
                 "Accept-Encoding": "identity",
@@ -291,10 +311,10 @@ class RagFlowGraphAdapter:
 
     @staticmethod
     def _boundary_error() -> RagError:
-        """生成不泄漏其他版本 ID 的稳定冲突，调用方须清理物理文档后重建。"""
+        """生成不泄漏其他版本 ID 的稳定来源冲突，不能把旧图产物当成当前活动图。"""
         return RagError(
             "RAG-GRAPH-004",
-            "图谱要求全部物理文档与当前已就绪活动文档严格一致，请完成摄取或清理旧版本后重建",
+            "图谱来源必须全部属于当前已就绪活动文档，且物理文档集合必须一致，请完成摄取或清理旧图后重建",
             HTTPStatus.CONFLICT,
             False,
         )
@@ -373,20 +393,120 @@ class RagFlowGraphAdapter:
             raise self._boundary_error()
         return frozenset(local_ids)
 
+    async def _read_validated_graph(self, knowledge_base: KnowledgeBase) -> _NativeGraphStructure:
+        """核验物理集合并读取完整受限图；快照发布和导航不能采用不同的来源规则。
+
+        v0.26.4 的重建可能复用旧合并检查点：当前物理文档已删干净、任务进度为 1，
+        并不证明图节点、边或全图元信息没有旧来源。必须逐项验证 source_id，任何
+        删除/跨范围来源都明确拒绝，不能只统计节点后让 Worker 发布 READY。
+        """
+        active_ids = await self._active_document_ids(knowledge_base)
+        # 官方 v0.26.4 路由没有读取 max_nodes 查询参数，不发送未经支持的假限额。
+        data = _object(await self._request("GET", f"{self._dataset_path(knowledge_base)}/graph"))
+        graph = _object(data.get("graph", {}))
+        nodes, edges = graph.get("nodes", []), graph.get("edges", [])
+        if (
+            not isinstance(nodes, list)
+            or not isinstance(edges, list)
+            or len(nodes) >= _GRAPH_NODE_TRUNCATION_LIMIT
+            or len(edges) >= _GRAPH_EDGE_TRUNCATION_LIMIT
+        ):
+            # 官方服务已裁剪为 nodes[:256]、edges[:128]，且没有完整性标志。达到
+            # 裁剪界限就无法证明尾部不存在旧来源；不能把恰好饱和的响应当作完整图。
+            raise RagFlowError.invalid_response()
+
+        def source_ids(value: Any, *, allow_empty: bool = False) -> frozenset[str]:
+            """验证原生 source_id 文档数组；只有可选全图元信息允许空来源集合。"""
+            if not isinstance(value, list) or (not value and not allow_empty):
+                raise RagFlowError.invalid_response()
+            identifiers = frozenset(_identifier(identifier) for identifier in value)
+            if not identifiers <= active_ids:
+                raise self._boundary_error()
+            return identifiers
+
+        if "graph" in graph:
+            attributes = _object(graph["graph"])
+            if "source_id" in attributes:
+                source_ids(attributes["source_id"], allow_empty=True)
+
+        validated: dict[str, _NativeGraphNode] = {}
+        normalized_names: set[str] = set()
+        for value in nodes:
+            node = _object(value)
+            identifier, normalized_id = _entity_label(node.get("id"))
+            label, normalized_name = _entity_label(node.get("entity_name"))
+            if (
+                normalized_id != normalized_name
+                or identifier in validated
+                or normalized_name in normalized_names
+            ):
+                raise RagFlowError.invalid_response()
+            validated[identifier] = _NativeGraphNode(
+                label, normalized_name, source_ids(node.get("source_id"))
+            )
+            normalized_names.add(normalized_name)
+
+        adjacent: dict[str, set[str]] = {identifier: set() for identifier in validated}
+        for value in edges:
+            edge = _object(value)
+            source, target = _identifier(edge.get("source")), _identifier(edge.get("target"))
+            if source not in validated or target not in validated:
+                raise RagFlowError.invalid_response()
+            source_ids(edge.get("source_id"))
+            # 连接仅用于找相邻实体，不把边描述或方向解释为事实声明。
+            adjacent[source].add(target)
+            adjacent[target].add(source)
+        return _NativeGraphStructure(validated, adjacent, len(edges))
+
     async def configure(
         self,
         security_scope_id: str,
         knowledge_base_id: UUID,
         graph_generation: int,
         configuration: GraphConfiguration,
+        *,
+        previous_task_id: str | None,
     ) -> None:
-        """读取现有 Dataset 并仅替换受控图谱子配置；不触发索引，不覆盖解析字段。"""
+        """按已持久准备意图清理旧终态图，再合并受控配置，不触发收费构图。
+
+        previous_task_id 来自 Worker 清理之前已经提交的终态观察；已记录旧终态
+        而任务现在为空时，可以幂等重做清理。None 则要求首次无任务且原生图为空。
+        只调用官方图谱索引删除，保留 Dataset 文档、原始 Chunk 和通用模型缓存。
+        """
         knowledge_base = await self._knowledge_base(
             security_scope_id, knowledge_base_id, graph_generation
         )
         if configuration.enabled:
             self._require_enabled()
         GraphProfile(configuration.profile_ref)
+        if previous_task_id is not None:
+            _identifier(previous_task_id)
+
+        def require_prepared_task(observed: GraphTask | None) -> None:
+            """确认任务身份；只有已记录终态意图的旧 ID 才允许在任务缺失时继续清理。"""
+            if previous_task_id is None:
+                if observed is not None:
+                    raise RagError(
+                        "RAG-GRAPH-007", "原生任务已变化，不能按首次构图准备继续", 409, False
+                    )
+            elif observed is not None:
+                if observed.engine_task_id != previous_task_id:
+                    raise RagError("RAG-GRAPH-007", "原生任务已被其他构建替换", 409, False)
+                if observed.status not in {GraphStatus.READY, GraphStatus.FAILED}:
+                    raise RagError("RAG-GRAPH-006", "旧原生任务仍在运行，不能清理", 409, False)
+
+        observed = await self._observe_index_task(
+            knowledge_base,
+            graph_generation,
+            verify_sources=False,
+        )
+        require_prepared_task(observed)
+        if previous_task_id is None:
+            existing_graph = await self._read_validated_graph(knowledge_base)
+            if existing_graph.nodes or existing_graph.relation_count:
+                raise RagError(
+                    "RAG-GRAPH-006", "存在无可核验终态任务的旧图，不能按首次构图清理", 409, False
+                )
         data = await self._request(
             "GET", "/api/v1/datasets", params={"id": knowledge_base.ragflow_dataset_id}
         )
@@ -399,6 +519,20 @@ class RagFlowGraphAdapter:
         parser_config = dict(_object(dataset.get("parser_config")))
         # light@1 的语义固定；不继承外部遗留的 general/community 或任意上游参数。
         parser_config["graphrag"] = native_graph_parser_config(configuration)
+        # 删除前紧邻再次观察身份/终态。上游没有任务条件删除或 CAS 参数，因此仍依赖
+        # 本地唯一在途任务和有效租约；不能把任意新任务的终态借来确认旧任务停止。
+        latest = await self._observe_index_task(
+            knowledge_base,
+            graph_generation,
+            verify_sources=False,
+        )
+        require_prepared_task(latest)
+        if previous_task_id is not None:
+            await self._request(
+                "DELETE",
+                f"{self._dataset_path(knowledge_base)}/index",
+                params={"type": "graph", "wipe": "true"},
+            )
         # 沿用官方顶层 ext 扩展：公开 Schema 只验证 graph 子配置，完整回读配置由
         # 服务层在校验后合并保存。这样 overlapped_percent 等已有字段不会被拒绝或丢失。
         await self._request(
@@ -440,6 +574,20 @@ class RagFlowGraphAdapter:
         knowledge_base = await self._knowledge_base(
             security_scope_id, knowledge_base_id, graph_generation
         )
+        return await self._observe_index_task(knowledge_base, graph_generation, verify_sources=True)
+
+    async def _observe_index_task(
+        self,
+        knowledge_base: KnowledgeBase,
+        graph_generation: int,
+        *,
+        verify_sources: bool,
+    ) -> GraphTask | None:
+        """统一读取原生任务；清理前只核终态身份，公开任务读取仍另核活动物理集合。
+
+        清理的最后核对不能在 GET index 与 DELETE 之间插入文档请求。此处的终态只
+        说明原生执行已结束，不替代 snapshot 对派生图来源的发布验收。
+        """
         data = _object(
             await self._request(
                 "GET", f"{self._dataset_path(knowledge_base)}/index", params={"type": "graph"}
@@ -460,13 +608,14 @@ class RagFlowGraphAdapter:
             status = GraphStatus.FAILED
         elif progress == 1:
             # 完成后再次核验，避免候选上传或旧版残留期间把派生索引公开为 READY。
-            await self._active_document_ids(knowledge_base)
+            if verify_sources:
+                await self._active_document_ids(knowledge_base)
             status = GraphStatus.READY
         elif progress == 0:
             status = GraphStatus.QUEUED
         return GraphTask(
-            security_scope_id,
-            knowledge_base_id,
+            knowledge_base.security_scope_id,
+            knowledge_base.id,
             graph_generation,
             _identifier(data.get("id", data.get("task_id"))),
             status,
@@ -477,30 +626,18 @@ class RagFlowGraphAdapter:
     async def snapshot(
         self, security_scope_id: str, knowledge_base_id: UUID, graph_generation: int
     ) -> GraphSnapshot:
-        """读取官方有限图结构并只返回统计与实体名称；空图不算协议异常。"""
+        """完整验证原生图所有来源后返回有限统计；删除来源或无效结构禁止发布。"""
         knowledge_base = await self._knowledge_base(
             security_scope_id, knowledge_base_id, graph_generation
         )
-        await self._active_document_ids(knowledge_base)
-        data = _object(await self._request("GET", f"{self._dataset_path(knowledge_base)}/graph"))
-        graph = _object(data.get("graph", {}))
-        nodes, edges = graph.get("nodes", []), graph.get("edges", [])
-        if not isinstance(nodes, list) or not isinstance(edges, list):
-            raise RagFlowError.invalid_response()
-        names = tuple(
-            dict.fromkeys(
-                name
-                for node in nodes[:256]
-                if isinstance(node, dict) and (name := _term(node.get("id"))) is not None
-            )
-        )
+        graph = await self._read_validated_graph(knowledge_base)
         return GraphSnapshot(
             security_scope_id,
             knowledge_base_id,
             graph_generation,
-            names,
-            len(nodes),
-            len(edges),
+            tuple(node.label for node in graph.nodes.values()),
+            len(graph.nodes),
+            graph.relation_count,
         )
 
     async def cancel(
@@ -537,77 +674,46 @@ class RagFlowGraphAdapter:
         )
         self._require_enabled()
         if (
-            not question.strip() or isinstance(limit, bool)
+            not question.strip()
+            or isinstance(limit, bool)
             or not 1 <= limit <= _MAX_STRUCTURAL_TERMS
         ):
             raise ValueError("question must be non-empty and structural limit must be within 1..8")
-        active_ids = await self._active_document_ids(knowledge_base)
-        # 官方 v0.26.4 路由没有读取 max_nodes 查询参数，不发送未经支持的假限额。
-        data = _object(await self._request("GET", f"{self._dataset_path(knowledge_base)}/graph"))
-        graph = _object(data.get("graph", {}))
-        nodes, edges = graph.get("nodes", []), graph.get("edges", [])
-        if (
-            not isinstance(nodes, list) or not isinstance(edges, list)
-            or len(nodes) > _MAX_STRUCTURAL_NODES or len(edges) > _MAX_STRUCTURAL_EDGES
-        ):
-            # 不截断后再检查：被截掉的尾部可能含跨范围来源或非法连接。
-            raise RagFlowError.invalid_response()
-
-        def source_ids(value: Any) -> frozenset[str]:
-            """验证原生 source_id 文档数组；它不是 Chunk ID，也不直接形成引用。"""
-            if not isinstance(value, list) or not value:
-                raise RagFlowError.invalid_response()
-            identifiers = frozenset(_identifier(identifier) for identifier in value)
-            if not identifiers <= active_ids:
-                # 原生图可能残留已删除版本；即使物理文档集合已清理，也不能采用旧图。
-                raise self._boundary_error()
-            return identifiers
-
-        validated: dict[str, tuple[str, str, frozenset[str]]] = {}
-        normalized_names: set[str] = set()
-        for value in nodes:
-            node = _object(value)
-            identifier, normalized_id = _entity_label(node.get("id"))
-            label, normalized_name = _entity_label(node.get("entity_name"))
-            if (
-                normalized_id != normalized_name or identifier in validated
-                or normalized_name in normalized_names
-            ):
-                raise RagFlowError.invalid_response()
-            validated[identifier] = (label, normalized_name, source_ids(node.get("source_id")))
-            normalized_names.add(normalized_name)
-
-        adjacent: dict[str, set[str]] = {identifier: set() for identifier in validated}
-        for value in edges:
-            edge = _object(value)
-            source, target = _identifier(edge.get("source")), _identifier(edge.get("target"))
-            if source not in validated or target not in validated:
-                raise RagFlowError.invalid_response()
-            source_ids(edge.get("source_id"))
-            # 连接仅用于找相邻实体，不把边描述或方向解释为事实声明。
-            adjacent[source].add(target)
-            adjacent[target].add(source)
-
+        graph = await self._read_validated_graph(knowledge_base)
+        validated = graph.nodes
         normalized_question = _match_text(question)
         seeds = sorted(
-            (identifier for identifier, (_, name, _) in validated.items()
-             if _entity_matches(normalized_question, name)),
-            key=lambda identifier: (-len(validated[identifier][1]), validated[identifier][1]),
+            (
+                identifier
+                for identifier, node in validated.items()
+                if _entity_matches(normalized_question, node.normalized_name)
+            ),
+            key=lambda identifier: (
+                -len(validated[identifier].normalized_name),
+                validated[identifier].normalized_name,
+            ),
         )
         # 只从原问题真正命中的实体出发；无命中不能用高 Pagerank 节点伪装语义命中。
         seed_set = set(seeds)
         neighbors = sorted(
-            {neighbor for seed in seeds for neighbor in adjacent[seed]} - seed_set,
-            key=lambda identifier: validated[identifier][1],
+            {neighbor for seed in seeds for neighbor in graph.adjacent[seed]} - seed_set,
+            key=lambda identifier: validated[identifier].normalized_name,
         )
         selected = (*seeds, *neighbors)[:limit]
-        entities = tuple(validated[identifier][0] for identifier in selected)
-        document_ids = sorted({
-            document_id for identifier in selected for document_id in validated[identifier][2]
-        })[:limit]
+        entities = tuple(validated[identifier].label for identifier in selected)
+        document_ids = sorted(
+            {
+                document_id
+                for identifier in selected
+                for document_id in validated[identifier].source_ids
+            }
+        )[:limit]
         return GraphNavigation(
-            security_scope_id, knowledge_base_id, graph_generation,
-            entities, entities,
+            security_scope_id,
+            knowledge_base_id,
+            graph_generation,
+            entities,
+            entities,
             tuple(GraphSourceReference(document_id) for document_id in document_ids),
         )
 

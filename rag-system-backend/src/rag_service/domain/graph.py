@@ -168,8 +168,15 @@ class GraphPort(Protocol):
         knowledge_base_id: UUID,
         graph_generation: int,
         configuration: GraphConfiguration,
+        *,
+        previous_task_id: str | None,
     ) -> None:
-        """合并受控图谱配置；保留已有解析器设置，不启动构建。"""
+        """按持久准备意图清理旧终态图并合并配置，保留原文与通用模型缓存。
+
+        ``previous_task_id`` 必须来自 Worker 先持久化的终态观察；None 表示首次
+        已确认无任务，仍须检查原生图为空。只清理原生图派生产物，不启动构建。
+        已提交任务的恢复不得重新调用此操作，避免误删进行中的图或重复付费。
+        """
         ...
 
     async def build(

@@ -104,24 +104,38 @@ class Engine:
         self.status = GraphStatus.READY
         self.response_lost = False
         self.absent = False
+        self.current_task_id: str | None = None
+        self.configure_calls: list[str | None] = []
         self.on_snapshot: Any = None
 
-    async def configure(self, *args: Any) -> None:
-        """配置操作不计作收费构图。"""
-        return None
+    async def configure(
+        self, scope: str, kb_id: UUID, generation: int, configuration: GraphConfiguration,
+        *, previous_task_id: str | None,
+    ) -> None:
+        """配置操作不计作收费构图；记录准备身份并模拟终态图清理后的任务记录消失。"""
+        self.configure_calls.append(previous_task_id)
+        if previous_task_id is None and self.current_task_id is not None:
+            raise RagError("RAG-GRAPH-007", "合成原生任务已变化", 409, False)
+        if previous_task_id is not None and self.current_task_id is not None:
+            if self.current_task_id != previous_task_id:
+                raise RagError("RAG-GRAPH-007", "合成原生任务已替换", 409, False)
+            if self.status not in {GraphStatus.READY, GraphStatus.FAILED}:
+                raise RagError("RAG-GRAPH-006", "合成原生任务未结束", 409, False)
+        self.current_task_id = None
 
     async def build(self, scope: str, kb_id: UUID, generation: int) -> GraphTask:
         """模拟请求可能已被接受但响应丢失。"""
         self.build_count += 1
+        self.current_task_id = f"task-{self.build_count}"
         if self.response_lost:
             raise RagError("RAG-RF-003", "构图响应超时", 504, True)
-        return GraphTask(scope, kb_id, generation, "task-1", self.status, 1.0)
+        return GraphTask(scope, kb_id, generation, self.current_task_id, self.status, 1.0)
 
     async def task(self, scope: str, kb_id: UUID, generation: int) -> GraphTask | None:
         """回读同一任务或模拟取消后上游删除任务记录。"""
-        if self.absent:
+        if self.absent or self.current_task_id is None:
             return None
-        return GraphTask(scope, kb_id, generation, "task-1", self.status, 1.0)
+        return GraphTask(scope, kb_id, generation, self.current_task_id, self.status, 1.0)
 
     async def snapshot(self, scope: str, kb_id: UUID, generation: int) -> GraphSnapshot:
         """在二次来源校验处注入并发内容变更。"""
@@ -307,6 +321,7 @@ async def test_lost_submission_recovers_without_second_build(graph_env: Any) -> 
     job.attempt += 1
     await worker.execute(job)
     assert job.status == JobStatus.SUCCEEDED and engine.build_count == 1
+    assert engine.configure_calls == [None]
 
 
 async def test_unknown_submission_does_not_resubmit(graph_env: Any) -> None:
@@ -694,7 +709,7 @@ async def test_publish_cas_conflict_rolls_back_and_revalidates_without_another_p
     snapshots: list[int] = []
 
     async def observe_snapshot() -> None:
-        """记录每次来源复核看到的内容修订，证明冲突后没有复用第一次来源快照。"""
+        """记录拟发布 READY 的来源复核；内容已过时后不再验收不会使用的旧图。"""
         snapshots.append(resources.kb.revision)
 
     async def concurrent_commit_before_publish(
@@ -746,10 +761,10 @@ async def test_publish_cas_conflict_rolls_back_and_revalidates_without_another_p
 
     state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
     assert changes == rollbacks == conflict_count
-    assert snapshots == [
-        previous_revision + (index if change == "content" else 0)
-        for index in range(conflict_count + 1)
-    ]
+    assert snapshots == (
+        [previous_revision] if change == "content"
+        else [previous_revision] * (conflict_count + 1)
+    )
     assert job.status == JobStatus.SUCCEEDED and job.attempt == job.max_attempts
     assert job.payload["content_revision"] == previous_revision
     assert engine.build_count == 1
@@ -836,3 +851,290 @@ async def test_persistent_publish_cas_conflicts_stop_after_three_local_attempts(
     assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-005"
     assert state.status == GraphStatus.FAILED and len(resources.jobs) == 1
     assert engine.build_count == 1 and job.payload["submission_started"]
+
+
+async def test_preparation_intent_is_checkpointed_before_configure_and_submission(
+    graph_env: Any,
+) -> None:
+    """首次准备身份先独立提交；配置成功后才持久化真正提交标记并调用收费构图。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    original_configure = engine.configure
+    original_build = engine.build
+
+    async def verify_preparation(
+        scope: str, kb_id: UUID, generation: int, configuration: GraphConfiguration,
+        *, previous_task_id: str | None,
+    ) -> None:
+        """清理配置之前，仓库必须已有独立准备记录且尚未声明真正提交。"""
+        stored = resources.jobs[job.id]
+        assert stored.payload["preparation_started"] is True
+        assert "preparation_task_id" in stored.payload and previous_task_id is None
+        assert stored.payload["preparation_task_id"] is None
+        assert stored.payload["previous_engine_task_id"] is None
+        assert not stored.payload.get("submission_started") and engine.build_count == 0
+        await original_configure(
+            scope, kb_id, generation, configuration, previous_task_id=previous_task_id,
+        )
+
+    async def verify_submission(scope: str, kb_id: UUID, generation: int) -> GraphTask:
+        """POST 原生任务之前，配置已经成功且真正提交标记已经保存在仓库。"""
+        assert resources.jobs[job.id].payload["submission_started"] is True
+        assert engine.configure_calls == [None]
+        return await original_build(scope, kb_id, generation)
+
+    engine.configure = verify_preparation
+    engine.build = verify_submission
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    assert job.status == JobStatus.SUCCEEDED and engine.build_count == 1
+
+
+@pytest.mark.parametrize("status,identifier", [
+    (GraphStatus.QUEUED, "busy-task"),
+    (GraphStatus.BUILDING, "busy-task"),
+    (GraphStatus.CANCELLING, "busy-task"),
+    (GraphStatus.READY, None),
+    (GraphStatus.FAILED, ""),
+])
+async def test_nonterminal_or_unidentified_preflight_never_clears_or_submits(
+    graph_env: Any, status: GraphStatus, identifier: str | None,
+) -> None:
+    """准备之前必须知道旧任务已结束且具有真实 ID，不能把未知或运行状态当成清理授权。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+
+    async def unsafe_observation(scope: str, kb_id: UUID, generation: int) -> GraphTask:
+        """显式模拟 Port 返回不可清理的任务观察；None 返回值与缺 ID 的对象不同。"""
+        return GraphTask(scope, kb_id, generation, identifier, status)
+
+    engine.task = unsafe_observation
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-006"
+    assert not job.payload.get("preparation_started")
+    assert engine.configure_calls == [] and engine.build_count == 0
+
+
+async def test_preparation_records_actually_observed_terminal_identity(graph_env: Any) -> None:
+    """准备身份使用引擎真实观察，不沿用可能过期的本地历史任务 ID。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    job.payload["previous_engine_task_id"] = "stale-local-task"
+    engine.current_task_id = "observed-terminal-task"
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    assert job.status == JobStatus.SUCCEEDED
+    assert job.payload["preparation_task_id"] == "observed-terminal-task"
+    assert job.payload["previous_engine_task_id"] == "observed-terminal-task"
+    assert engine.configure_calls == ["observed-terminal-task"]
+    assert engine.build_count == 1 and engine.current_task_id == "task-1"
+
+
+class _PreparationProcessCrash(BaseException):
+    """模拟清理已生效、但进程在真正提交之前退出，不被普通业务异常恢复吞掉。"""
+
+
+async def test_crash_after_cleanup_recovers_from_persisted_terminal_intent_without_double_build(
+    graph_env: Any,
+) -> None:
+    """清理已经删除任务记录后崩溃，恢复必须复用旧终态意图，而不是把空任务当新授权。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    engine.current_task_id = "old-terminal-task"
+    original_configure = engine.configure
+    original_task = engine.task
+    observations = 0
+
+    async def count_preflight(scope: str, kb_id: UUID, generation: int) -> GraphTask | None:
+        """记录旧任务终态观察次数，恢复不能重观察空任务并覆盖已经提交的旧身份。"""
+        nonlocal observations
+        observations += 1
+        return await original_task(scope, kb_id, generation)
+
+    async def crash_after_cleanup(
+        scope: str, kb_id: UUID, generation: int, configuration: GraphConfiguration,
+        *, previous_task_id: str | None,
+    ) -> None:
+        """先模拟真实清理效果，再让进程退出，保留独立准备事务及未提交收费的事实。"""
+        await original_configure(
+            scope, kb_id, generation, configuration, previous_task_id=previous_task_id,
+        )
+        raise _PreparationProcessCrash
+
+    engine.task = count_preflight
+    engine.configure = crash_after_cleanup
+    with pytest.raises(_PreparationProcessCrash):
+        await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    persisted = deepcopy(resources.jobs[job.id])
+    assert persisted.payload["preparation_task_id"] == "old-terminal-task"
+    assert persisted.payload["preparation_started"] is True
+    assert not persisted.payload.get("submission_started")
+    assert engine.current_task_id is None and engine.build_count == 0
+
+    engine.configure = original_configure
+    await GraphWorker(resources, graphs, resources, engine, service).execute(persisted)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert observations == 1
+    assert engine.configure_calls == ["old-terminal-task", "old-terminal-task"]
+    assert persisted.status == JobStatus.SUCCEEDED and state.status == GraphStatus.READY
+    assert engine.build_count == state.graph_generation == 1
+
+
+async def test_incomplete_preparation_marker_is_not_treated_as_first_build(graph_env: Any) -> None:
+    """已有准备标记却没有旧任务字段属于未知恢复状态，不能隐式采用首次构图清理规则。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    job.payload["preparation_started"] = True
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-006"
+    assert engine.configure_calls == [] and engine.build_count == 0
+
+
+async def test_cancel_after_preparation_checkpoint_stops_before_destructive_configuration(
+    graph_env: Any,
+) -> None:
+    """准备意图提交后管理员取消，复读取消状态应阻止清图配置和收费提交。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    cancellation_sent = False
+
+    async def cancel_after_preparation() -> None:
+        """只在独立准备检查点注入一次并发取消，之后收尾检查点仍可正常提交。"""
+        nonlocal cancellation_sent
+        if job.payload.get("preparation_started") and not cancellation_sent:
+            cancellation_sent = True
+            await service.cancel(security, resources.kb.id)
+
+    await GraphWorker(
+        resources, graphs, resources, engine, service, checkpoint=cancel_after_preparation,
+    ).execute(job)
+    assert cancellation_sent and job.status == JobStatus.CANCELLED
+    assert engine.configure_calls == [] and engine.build_count == 0
+
+
+async def test_obsolete_completed_graph_schedules_one_successor_without_reading_deleted_sources(
+    graph_env: Any,
+) -> None:
+    """旧原生任务已完成但内容已删除时，只创建最新后继，不验收或发布旧来源图。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    worker = GraphWorker(resources, graphs, resources, engine, service)
+    engine.response_lost = True
+    await worker.execute(job)
+    assert job.status == JobStatus.RETRY_WAIT and engine.build_count == 1
+    resources.kb.revision += 1
+    await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+    snapshot_count = 0
+
+    async def deleted_source_snapshot(scope: str, kb_id: UUID, generation: int) -> GraphSnapshot:
+        """旧图若被读取就会因删除来源失败；过时结果没有必要承担这项发布验收。"""
+        nonlocal snapshot_count
+        snapshot_count += 1
+        raise RagError("RAG-GRAPH-004", "合成旧图仍含已删除文档来源", 409, False)
+
+    engine.snapshot = deleted_source_snapshot
+    job.status = JobStatus.RUNNING
+    job.attempt += 1
+    await worker.execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert snapshot_count == 0
+    assert job.status == JobStatus.SUCCEEDED and job.result["published"] is False
+    assert state.status == GraphStatus.QUEUED and state.graph_generation == 0
+    assert len(resources.jobs) == 2 and engine.build_count == 1
+    assert resources.jobs[state.job_id].payload["content_revision"] == resources.kb.revision
+    assert engine.configure_calls == [None]
+
+
+async def test_deleted_source_during_snapshot_converges_to_one_successor_without_ready(
+    graph_env: Any,
+) -> None:
+    """来源验收期间完成删除导致 GRAPH004，复读证明已过时后安排后继，不永久失败。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    job.attempt = job.max_attempts
+    snapshot_count = 0
+    saved_statuses: list[GraphStatus] = []
+    original_update = graphs.update
+
+    async def record_update(scope: str, state: GraphState, *, expected_row_version: int) -> bool:
+        """记录真实状态写入，确保旧图未曾以 READY 暴露而后又被补救撤回。"""
+        saved_statuses.append(state.status)
+        return await original_update(scope, state, expected_row_version=expected_row_version)
+
+    async def delete_during_snapshot(scope: str, kb_id: UUID, generation: int) -> GraphSnapshot:
+        """模拟文档删除事务已提交，但旧原生图节点仍保留该文档的 source_id。"""
+        nonlocal snapshot_count
+        snapshot_count += 1
+        resources.kb.revision += 1
+        await service.content_changed(scope, kb_id)
+        raise RagError("RAG-GRAPH-004", "合成旧图仍含已删除文档来源", 409, False)
+
+    graphs.update = record_update
+    engine.snapshot = delete_during_snapshot
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert snapshot_count == 1 and GraphStatus.READY not in saved_statuses
+    assert job.status == JobStatus.SUCCEEDED and job.result["published"] is False
+    assert state.status == GraphStatus.QUEUED and state.graph_generation == 0
+    assert len(resources.jobs) == 2 and engine.build_count == 1
+    assert resources.jobs[state.job_id].payload["content_revision"] == resources.kb.revision
+
+
+@pytest.mark.parametrize("receipt_only", [False, True])
+async def test_source_failure_without_obsolete_content_still_fails_closed(
+    graph_env: Any, receipt_only: bool,
+) -> None:
+    """内容和目标修订未落后时，来源异常保持 FAILED；只有行版本推进不能替代证据。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    snapshot_count = 0
+
+    async def invalid_source(scope: str, kb_id: UUID, generation: int) -> GraphSnapshot:
+        """可选地只登记摄取 receipt，但没有内容提交可以证明旧快照已经过时。"""
+        nonlocal snapshot_count
+        snapshot_count += 1
+        if receipt_only:
+            await service.content_changed(scope, kb_id, auto_build=False)
+        raise RagError("RAG-GRAPH-004", "合成图来源无法核验", 409, False)
+
+    engine.snapshot = invalid_source
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert snapshot_count == 1
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-004"
+    assert state.status == GraphStatus.FAILED and state.graph_generation == 0
+    assert len(resources.jobs) == engine.build_count == 1
+
+
+async def test_receipt_during_valid_snapshot_requires_revalidation_with_original_cas_version(
+    graph_env: Any,
+) -> None:
+    """snapshot 期间只推进 row_version 也须重验，不能用之后新读的版本直接发布。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    job.attempt = job.max_attempts
+    snapshots = 0
+    rollbacks = 0
+    original_revision = resources.kb.revision
+
+    async def register_receipt_once() -> None:
+        """第一次来源校验期间只登记物理集合可能变化，尚未递增内容修订。"""
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 1:
+            await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+
+    async def rollback_obsolete_validation() -> None:
+        """回滚过期的来源验收，独立 receipt 保持提交，原生任务不重建。"""
+        nonlocal rollbacks
+        rollbacks += 1
+        state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+        assert state.status == GraphStatus.BUILDING
+
+    engine.on_snapshot = register_receipt_once
+    await GraphWorker(
+        resources, graphs, resources, engine, service, rollback=rollback_obsolete_validation,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert resources.kb.revision == original_revision
+    assert snapshots == 2 and rollbacks == 1
+    assert state.status == GraphStatus.READY and state.graph_generation == 1
+    assert job.status == JobStatus.SUCCEEDED and len(resources.jobs) == engine.build_count == 1

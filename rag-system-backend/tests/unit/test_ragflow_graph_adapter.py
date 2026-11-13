@@ -197,6 +197,11 @@ async def test_configure_preserves_full_parser_without_triggering_index() -> Non
 
     def handler(request: httpx.Request) -> httpx.Response:
         """验证官方 GET 列表和 PUT 扩展协议，完整配置仅来自已验证映射回读。"""
+        if request.url.path.endswith("/index"):
+            assert request.method == "GET" and request.url.params["type"] == "graph"
+            return _ok({})
+        if request.url.path.endswith("/graph"):
+            return _ok({"graph": {}})
         if request.method == "GET":
             assert request.url.params["id"] == _DATASET
             return _ok([{"id": _DATASET, "parser_config": existing}])
@@ -218,8 +223,11 @@ async def test_configure_preserves_full_parser_without_triggering_index() -> Non
         return _ok({})
 
     async with _fixture(handler) as fixture:
-        await fixture.adapter.configure(_SCOPE, _KB_ID, 2, GraphConfiguration(enabled=True))
-        assert len(fixture.requests) == 2
+        await fixture.adapter.configure(
+            _SCOPE, _KB_ID, 2, GraphConfiguration(enabled=True), previous_task_id=None,
+        )
+        assert len(fixture.requests) == 6
+        assert not any(request.method in {"POST", "DELETE"} for request in fixture.requests)
         assert "graphrag" not in existing or existing["graphrag"]["method"] == "general"
 
 
@@ -287,8 +295,8 @@ async def test_snapshot_returns_only_names_and_counts() -> None:
     """结构查看只公开实体名与计数，不把节点描述或摘要转换成证据。"""
     data = {
         "graph": {
-            "nodes": [{"id": "Alice", "description": "generated"}, {"id": "Bob"}],
-            "edges": [{"source": "Alice", "target": "Bob"}],
+            "nodes": [_native_node("Alice"), _native_node("Bob")],
+            "edges": [_native_edge("Alice", "Bob")],
         }
     }
     async with _fixture(lambda request: _ok(data)) as fixture:
@@ -643,38 +651,47 @@ async def test_structural_navigation_without_a_name_match_never_uses_description
 
 
 @pytest.mark.parametrize("kind", ["node", "edge"])
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
 async def test_structural_navigation_rejects_any_cross_source_even_on_unselected_elements(
-    kind: str,
+    kind: str, operation: str,
 ) -> None:
-    """未选中的尾部节点或边也必须属于活动文档，不能静默跳过跨范围图谱残留。"""
+    """快照发布和导航都核验尾部节点/边，不能静默跳过未被检索选中的旧来源。"""
     data = _native_graph()
     elements = data["graph"]["nodes" if kind == "node" else "edges"]
     elements[-1]["source_id"] = ["document-1", "foreign-or-retired-document"]
     async with _fixture(lambda request: _ok(data)) as fixture:
         with pytest.raises(RagError, match="RAG-GRAPH-004"):
-            await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 0)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
 
 
 @pytest.mark.parametrize("kind", ["node", "edge"])
 @pytest.mark.parametrize("source_value", [None, [], "document-1", [""]])
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
 async def test_structural_navigation_requires_nonempty_document_source_arrays(
-    kind: str, source_value: Any,
+    kind: str, source_value: Any, operation: str,
 ) -> None:
-    """缺失或无效 source_id 不能当成可核验原生来源，保持显式协议降级。"""
+    """快照不能只计数：缺失或无效 source_id 和导航一样必须明确协议降级。"""
     data = _native_graph()
     elements = data["graph"]["nodes" if kind == "node" else "edges"]
     elements[0]["source_id"] = source_value
     async with _fixture(lambda request: _ok(data)) as fixture:
         with pytest.raises(RagFlowError, match="RAG-RF-004"):
-            await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 0)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
 
 
 @pytest.mark.parametrize("problem", [
     "missing_name", "empty_id", "different_name", "duplicate_id", "normalized_duplicate",
     "invisible_name", "unknown_endpoint",
 ])
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
 async def test_structural_navigation_rejects_ambiguous_nodes_and_invalid_edge_endpoints(
-    problem: str,
+    problem: str, operation: str,
 ) -> None:
     """图节点身份和边端点必须自洽；异常结构不能借描述或别名补造一条关系。"""
     data = _native_graph()
@@ -695,20 +712,28 @@ async def test_structural_navigation_rejects_ambiguous_nodes_and_invalid_edge_en
         graph["edges"][0]["source"] = "UNVERIFIED ENTITY"
     async with _fixture(lambda request: _ok(data)) as fixture:
         with pytest.raises(RagFlowError, match="RAG-RF-004"):
-            await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 0)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
 
 
 @pytest.mark.parametrize("kind", ["nodes", "edges"])
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
+@pytest.mark.parametrize("excess", [0, 1])
 async def test_structural_graph_over_budget_is_rejected_without_silent_truncation(
-    kind: str,
+    kind: str, operation: str, excess: int,
 ) -> None:
-    """超过 256 节点或 1024 边保守降级，不能截掉尾部后声称已验证完整原生图。"""
+    """达到或超过官方 256 节点/128 边裁剪界限即拒绝，不能声称已经验证完整图。"""
     data = _native_graph()
-    budget = 256 if kind == "nodes" else 1024
-    data["graph"][kind] = [{} for _ in range(budget + 1)]
+    cutoff = 256 if kind == "nodes" else 128
+    data["graph"][kind] = [{} for _ in range(cutoff + excess)]
     async with _fixture(lambda request: _ok(data)) as fixture:
         with pytest.raises(RagFlowError, match="RAG-RF-004"):
-            await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 0)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
 
 
 @pytest.mark.parametrize("data", [{}, {"graph": {}}, {"graph": {"nodes": [], "edges": []}}])
@@ -809,3 +834,225 @@ async def test_structural_graph_stream_preserves_http_and_envelope_error_contrac
             await fixture.adapter.navigate(_SCOPE, _KB_ID, 0, "Atlas")
         assert caught.value.code == expected
         assert "sensitive" not in str(caught.value)
+
+
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
+async def test_completed_native_graph_with_deleted_source_cannot_be_published_or_navigated(
+    operation: str,
+) -> None:
+    """官方完成任务复用旧合并检查点时，物理集合已正确也不能接受含删除来源的图。
+
+    脱敏真实响应含 document-1/2；模拟 document-2 已经公开删除、活动物理集合仅
+    document-1。原生任务进度为 1 不替代来源验收，快照必须与导航一起明确拒绝。
+    """
+    path = Path(__file__).parents[1] / "fixtures" / "ragflow-v0.26.4-native-graph.json"
+    recorded = json.loads(path.read_text(encoding="utf-8-sig"))
+    assert recorded["progress"]["body"]["data"]["progress"] == 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """只回放旧原生图；物理文档列表由夹具明确返回当前唯一活动文档。"""
+        assert request.method == "GET" and request.url.path.endswith("/graph")
+        return httpx.Response(200, json=recorded["graph"]["body"])
+
+    async with _fixture(handler, documents=(_document(1),)) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-004"):
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 2)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 2, "Atlas")
+        assert len(fixture.requests) == 2
+        assert fixture.documents.calls == [(_SCOPE, _KB_ID, 1, None)]
+
+
+@pytest.mark.parametrize("operation", ["snapshot", "navigate"])
+@pytest.mark.parametrize("empty_nodes", [False, True])
+async def test_stale_whole_graph_source_metadata_is_rejected_even_when_nodes_look_current(
+    operation: str, empty_nodes: bool,
+) -> None:
+    """全图元信息残留删除来源也不能被正常节点或空节点计数掩盖。"""
+    data = _native_graph()
+    data["graph"]["graph"] = {"source_id": ["document-1", "deleted-document-2"]}
+    if empty_nodes:
+        data["graph"]["nodes"] = []
+        data["graph"]["edges"] = []
+    async with _fixture(lambda request: _ok(data)) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-004"):
+            if operation == "snapshot":
+                await fixture.adapter.snapshot(_SCOPE, _KB_ID, 2)
+            else:
+                await fixture.adapter.navigate(_SCOPE, _KB_ID, 2, "Atlas")
+
+
+async def test_snapshot_allows_an_empty_graph_with_empty_optional_source_metadata() -> None:
+    """尚无原生实体时允许明确的空元信息，不能把空图误判为删除来源泄漏。"""
+    data = {"graph": {"graph": {"source_id": []}, "nodes": [], "edges": []}}
+    async with _fixture(lambda request: _ok(data)) as fixture:
+        snapshot = await fixture.adapter.snapshot(_SCOPE, _KB_ID, 0)
+        assert snapshot.entity_count == snapshot.relation_count == 0
+        assert snapshot.entity_names == ()
+
+
+async def test_complete_graph_below_official_truncation_threshold_is_accepted() -> None:
+    """255 节点、127 边且来源完整的图未达到官方裁剪界限，快照与导航均可正常使用。"""
+    data = {"graph": {
+        "nodes": [_native_node(f"NODE {index}") for index in range(255)],
+        "edges": [_native_edge(f"NODE {index}", f"NODE {index + 1}") for index in range(127)],
+    }}
+    async with _fixture(lambda request: _ok(data)) as fixture:
+        snapshot = await fixture.adapter.snapshot(_SCOPE, _KB_ID, 1)
+        assert snapshot.entity_count == 255 and snapshot.relation_count == 127
+        navigation = await fixture.adapter.navigate(_SCOPE, _KB_ID, 1, "NODE 0")
+        assert navigation.entities == ("NODE 0", "NODE 1")
+
+
+def _preparation_dataset() -> httpx.Response:
+    """构造有普通解析配置的数据集，清图必须保留这些字段且不操作普通文档。"""
+    return _ok([{
+        "id": _DATASET,
+        "parser_config": {
+            "chunk_token_num": 256, "overlapped_percent": 10,
+            "llm_id": "registered-native-chat",
+        },
+    }])
+
+
+@pytest.mark.parametrize("progress", [1, -1])
+async def test_terminal_graph_cleanup_rechecks_identity_then_only_wipes_graph_before_parser_put(
+    progress: int,
+) -> None:
+    """已持久终态身份才可清旧图；最后 GET 紧邻 DELETE，普通文档/块/模型缓存不删除。"""
+    events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """只允许官方图索引删除和数据集配置 PUT；旧图中有删除来源也可按终态清理。"""
+        if request.url.path.endswith("/index"):
+            if request.method == "GET":
+                events.append("task")
+                assert dict(request.url.params) == {"type": "graph"}
+                return _ok({"id": "old-terminal-task", "progress": progress})
+            events.append("wipe")
+            assert request.method == "DELETE"
+            assert dict(request.url.params) == {"type": "graph", "wipe": "true"}
+            return _ok({})
+        if request.method == "GET":
+            events.append("dataset")
+            assert request.url.path == "/api/v1/datasets"
+            return _preparation_dataset()
+        events.append("put")
+        assert request.method == "PUT" and request.url.path == f"/api/v1/datasets/{_DATASET}"
+        config = json.loads(request.content)["ext"]["parser_config"]
+        assert config["overlapped_percent"] == 10 and config["llm_id"] == "registered-native-chat"
+        assert config["graphrag"]["community"] is False
+        assert config["graphrag"]["resolution"] is False
+        return _ok({})
+
+    async with _fixture(handler) as fixture:
+        await fixture.adapter.configure(
+            _SCOPE, _KB_ID, 2, GraphConfiguration(enabled=True),
+            previous_task_id="old-terminal-task",
+        )
+        assert events == ["task", "dataset", "task", "wipe", "put"]
+        assert len(fixture.requests) == 5
+        assert not any("/documents" in request.url.path for request in fixture.requests)
+        assert not any("/chunks" in request.url.path for request in fixture.requests)
+        assert not any("cache" in request.url.path for request in fixture.requests)
+        assert not any(request.method == "POST" for request in fixture.requests)
+
+
+async def test_persisted_terminal_cleanup_intent_can_repeat_wipe_after_task_record_disappears(
+) -> None:
+    """旧终态清理意图已持久化时，崩溃后任务为空允许幂等重清，而不重复提交收费构图。"""
+    wipe_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """模拟上次清理已删除任务记录，但本次仍可重做原生派生产物清理及配置。"""
+        nonlocal wipe_count
+        if request.url.path.endswith("/index"):
+            if request.method == "GET":
+                return _ok({})
+            assert request.method == "DELETE" and request.url.params["wipe"] == "true"
+            wipe_count += 1
+            return _ok({})
+        if request.method == "GET":
+            return _preparation_dataset()
+        assert request.method == "PUT"
+        return _ok({})
+
+    async with _fixture(handler) as fixture:
+        for _ in range(2):
+            await fixture.adapter.configure(
+                _SCOPE, _KB_ID, 2, GraphConfiguration(enabled=True),
+                previous_task_id="persisted-terminal-task",
+            )
+        assert wipe_count == 2
+        assert not any(request.method == "POST" for request in fixture.requests)
+
+
+@pytest.mark.parametrize("first,latest,expected", [
+    ({"id": "old", "progress": 0.4}, None, "RAG-GRAPH-006"),
+    ({"id": "replaced", "progress": 1}, None, "RAG-GRAPH-007"),
+    ({"id": "old", "progress": 1}, {"id": "replaced", "progress": 1}, "RAG-GRAPH-007"),
+    ({"id": "old", "progress": 1}, {"id": "old", "progress": 0.4}, "RAG-GRAPH-006"),
+    ({}, {"id": "replaced", "progress": 0.4}, "RAG-GRAPH-007"),
+])
+async def test_preparation_never_wipes_running_or_replaced_native_tasks(
+    first: dict[str, Any], latest: dict[str, Any] | None, expected: str,
+) -> None:
+    """旧任务仍运行、初次身份不符或最后核对被替换都明确拒绝，不误清理后继任务。"""
+    observations = iter([first, latest])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """只允许核对读操作；任何 DELETE/PUT 都说明安全边界被绕过。"""
+        assert request.method == "GET"
+        if request.url.path.endswith("/index"):
+            return _ok(next(observations))
+        return _preparation_dataset()
+
+    async with _fixture(handler) as fixture:
+        with pytest.raises(RagError, match=expected):
+            await fixture.adapter.configure(
+                _SCOPE, _KB_ID, 2, GraphConfiguration(enabled=True), previous_task_id="old",
+            )
+        assert not any(request.method in {"DELETE", "PUT", "POST"} for request in fixture.requests)
+
+
+@pytest.mark.parametrize("existing_task", [False, True])
+async def test_first_preparation_requires_both_absent_task_and_empty_graph(
+    existing_task: bool,
+) -> None:
+    """首次没有持久旧终态身份，不能把已有任务或无任务旧图解释成允许自动擦除。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        """提供未获清理授权的旧任务或合法但非空的旧图，禁止任何写操作。"""
+        assert request.method == "GET"
+        if request.url.path.endswith("/index"):
+            return _ok({"id": "unapproved-old-task", "progress": 1} if existing_task else {})
+        assert request.url.path.endswith("/graph")
+        return _ok(_native_graph())
+
+    async with _fixture(handler) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-007" if existing_task else "RAG-GRAPH-006"):
+            await fixture.adapter.configure(
+                _SCOPE, _KB_ID, 1, GraphConfiguration(enabled=True), previous_task_id=None,
+            )
+        assert not any(request.method in {"DELETE", "PUT", "POST"} for request in fixture.requests)
+
+
+async def test_first_preparation_empty_graph_check_uses_same_streaming_body_limit() -> None:
+    """首次空图确认也必须受 4 MiB 流式门禁约束，不能为了准备构图读取任意大图。"""
+    stream = _CountedGraphStream(128)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """无旧任务但空图确认返回超大分块内容，必须在配置或删除之前中止。"""
+        assert request.method == "GET"
+        if request.url.path.endswith("/index"):
+            return _ok({})
+        assert request.url.path.endswith("/graph")
+        return httpx.Response(200, stream=stream)
+
+    async with _fixture(handler) as fixture:
+        with pytest.raises(RagFlowError, match="RAG-RF-004"):
+            await fixture.adapter.configure(
+                _SCOPE, _KB_ID, 1, GraphConfiguration(enabled=True), previous_task_id=None,
+            )
+        assert stream.read_count == 65 and stream.closed
+        assert not any(request.method in {"DELETE", "PUT", "POST"} for request in fixture.requests)

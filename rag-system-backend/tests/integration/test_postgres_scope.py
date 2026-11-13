@@ -1083,13 +1083,31 @@ async def test_graph_followup_job_commits_under_old_lease_in_one_transaction(
     class CompletedEngine:
         """只替代上游网络；数据库、任务约束和租约均使用真实PostgreSQL。"""
 
-        async def configure(self, *_args: object) -> None:
-            """测试配置没有外部副作用。"""
+        submitted = False
+
+        async def configure(self, *_args: object, previous_task_id: str | None) -> None:
+            """接受已持久化的旧任务准备引用；测试配置没有外部副作用。"""
             return None
 
         async def build(self, resource_scope: str, kb_id: object, generation: int) -> GraphTask:
             """返回合成完成任务，不代表真实RAGFlow联调通过。"""
-            return GraphTask(scope, kb.id, generation, "synthetic-completed", GraphStatus.READY)
+            self.submitted = True
+            return GraphTask(
+                scope, kb.id, generation, "synthetic-completed", GraphStatus.READY, 1.0
+            )
+
+        async def task(
+            self,
+            resource_scope: str,
+            kb_id: object,
+            generation: int,
+        ) -> GraphTask | None:
+            """首次准备前没有原生任务，提交后才返回同一合成任务，符合公开协议。"""
+            if not self.submitted:
+                return None
+            return GraphTask(
+                scope, kb.id, generation, "synthetic-completed", GraphStatus.READY, 1.0
+            )
 
         async def snapshot(
             self, resource_scope: str, kb_id: object, generation: int

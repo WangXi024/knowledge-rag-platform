@@ -14,7 +14,13 @@ from datetime import timedelta
 from rag_service.application.graph import GraphService, noop_graph_checkpoint
 from rag_service.domain.errors import JobCancellationRequested, JobLeaseLostError, RagError
 from rag_service.domain.graph import GraphPort, GraphRepository, GraphState, GraphStatus, GraphTask
-from rag_service.domain.models import IngestionJob, JobStatus, KnowledgeBaseStatus, utc_now
+from rag_service.domain.models import (
+    IngestionJob,
+    JobStatus,
+    KnowledgeBase,
+    KnowledgeBaseStatus,
+    utc_now,
+)
 from rag_service.domain.ports import JobRepository, KnowledgeBaseRepository
 
 
@@ -87,6 +93,46 @@ class GraphWorker:
         generation = state.graph_generation + 1
         task: GraphTask | None
         if not job.payload.get("submission_started"):
+            if not job.payload.get("preparation_started"):
+                previous = await self._engine.task(
+                    job.security_scope_id, state.knowledge_base_id, generation
+                )
+                if previous is not None and (
+                    previous.status not in {GraphStatus.READY, GraphStatus.FAILED}
+                    or not isinstance(previous.engine_task_id, str)
+                    or not previous.engine_task_id.strip()
+                    or previous.security_scope_id != job.security_scope_id
+                    or previous.knowledge_base_id != state.knowledge_base_id
+                    or previous.graph_generation != generation
+                ):
+                    raise RagError(
+                        "RAG-GRAPH-006", "旧原生任务未明确结束，不能清理并开始新的构图", 409, False
+                    )
+                previous_task_id = previous.engine_task_id if previous is not None else None
+                # 清理可能删除原生任务记录。必须先独立提交所观察到的终态身份，崩溃
+                # 后才能区分“已获准清理后任务为空”和“任意缺失任务被误认为已停止”。
+                job.payload["preparation_started"] = True
+                job.payload["preparation_task_id"] = previous_task_id
+                job.payload["previous_engine_task_id"] = previous_task_id
+                await self._jobs.update(job.security_scope_id, job)
+                await self._checkpoint()
+            if "preparation_task_id" not in job.payload:
+                raise RagError("RAG-GRAPH-006", "构图准备缺少已持久化的旧任务身份", 409, False)
+            marker = job.payload["preparation_task_id"]
+            if marker is not None and (not isinstance(marker, str) or not marker.strip()):
+                raise RagError("RAG-GRAPH-006", "构图准备中的旧任务身份无效", 409, False)
+            previous_task_id = marker if isinstance(marker, str) else None
+            state = await self._state(job)
+            if state is None:
+                await self._finish(job, JobStatus.CANCELLED)
+                return
+            current_job = await self._jobs.get(job.security_scope_id, job.id)
+            if (
+                state.status == GraphStatus.CANCELLING or not state.configuration.enabled
+                or (current_job is not None and current_job.status == JobStatus.CANCEL_REQUESTED)
+            ):
+                await self._cancel(job, state)
+                return
             kb = await self._knowledge_bases.get(job.security_scope_id, state.knowledge_base_id)
             if kb is None or kb.status != KnowledgeBaseStatus.READY:
                 await self._finish(job, JobStatus.CANCELLED)
@@ -95,9 +141,10 @@ class GraphWorker:
             # 一旦 submission_started 已提交，恢复分支必须保留原内容快照。
             state.target_content_revision = kb.revision
             job.payload["content_revision"] = kb.revision
-            # 原生参数的更新可重试；真正构图之前的持久化标记不允许省略。
+            # 清理与参数更新可沿准备标记恢复；实际收费构图之前还需另存提交标记。
             await self._engine.configure(
-                job.security_scope_id, state.knowledge_base_id, generation, state.configuration
+                job.security_scope_id, state.knowledge_base_id, generation, state.configuration,
+                previous_task_id=previous_task_id,
             )
             state.status = GraphStatus.BUILDING
             state.started_at = state.started_at or utc_now()
@@ -164,7 +211,7 @@ class GraphWorker:
             task = observed
 
     async def _publish(self, job: IngestionJob, state: GraphState, generation: int) -> None:
-        """核验来源后以 CAS 发布；并发内容提交只重试发布，不再收费构图。
+        """当前快照严格核验后 CAS 发布；已过时的完成任务只安排后继，不再读取旧图。
 
         读取内容号之后仍可能有摄取提交，content_changed 必须同步推进图谱行版本。
         此类冲突在当前阶段最多回滚、复核三次，不额外消耗 Job attempt。少量并发
@@ -172,31 +219,41 @@ class GraphWorker:
         耗尽后明确 FAILED、允许人工重试，不能无限占用 Worker。
         """
         for publication_attempt in range(3):
-            # 每次 CAS 冲突后都重新验证全部物理来源，不能只刷新内容号而复用旧快照。
-            await self._engine.snapshot(job.security_scope_id, state.knowledge_base_id, generation)
-            kb = await self._knowledge_bases.get(job.security_scope_id, state.knowledge_base_id)
-            refreshed = await self._state(job)
-            if kb is None or kb.status != KnowledgeBaseStatus.READY or refreshed is None:
-                await self._finish(job, JobStatus.CANCELLED)
+            context = await self._publication_context(job)
+            if context is None:
                 return
-            state = refreshed
-            current_job = await self._jobs.get(job.security_scope_id, job.id)
-            if (
-                state.status == GraphStatus.CANCELLING
-                or not state.configuration.enabled
-                or (current_job is not None and current_job.status == JobStatus.CANCEL_REQUESTED)
-            ):
-                await self._cancel(job, state)
-                return
-            publishable = (
-                state.configuration.enabled
-                and kb.revision == job.payload.get("content_revision")
-                # 内容事务也可能恰好提交在上面的 KB 读取与图谱行读取之间；最新目标
-                # 修订可以识别此时尚未过期的行版本，避免只靠 CAS 漏掉该交错窗口。
-                and state.target_content_revision == job.payload.get("content_revision")
-                # 检索开关改变不使已经付费的图过期；不可变构图策略引用才是构建身份。
-                and state.configuration.profile_ref == job.payload.get("profile_ref")
-            )
+            kb, state = context
+            publishable = not self._obsolete(job, kb, state)
+            if publishable:
+                observed_row_version = state.row_version
+                try:
+                    await self._engine.snapshot(
+                        job.security_scope_id, state.knowledge_base_id, generation
+                    )
+                except RagError as error:
+                    if error.code != "RAG-GRAPH-004":
+                        raise
+                    latest = await self._publication_context(job)
+                    if latest is None:
+                        return
+                    latest_kb, latest_state = latest
+                    if not self._obsolete(job, latest_kb, latest_state):
+                        # 内容快照没有确实落后，来源异常仍是验收失败，不能借机放行。
+                        raise
+                else:
+                    latest = await self._publication_context(job)
+                    if latest is None:
+                        return
+                    latest_kb, latest_state = latest
+                if latest_state.row_version != observed_row_version:
+                    # 不能用验收之后读到的新版本直接 CAS。摄取可能只登记了 receipt，
+                    # 内容号尚未递增，仍必须回滚并重新执行来源核验或确认已过时。
+                    await self._retry_publication(publication_attempt)
+                    continue
+                # 保留 snapshot 之前的 state/row_version，KB 复读还能识别仅内容号
+                # 改变的交错；过时结果从不发布 READY，因此无需验收将被丢弃的旧图。
+                kb = latest_kb
+                publishable = not self._obsolete(job, kb, state)
             state.status = GraphStatus.READY if publishable else GraphStatus.STALE
             if publishable:
                 state.graph_generation = generation
@@ -208,18 +265,50 @@ class GraphWorker:
             except RagError as error:
                 if error.code != "RAG-GRAPH-005":
                     raise
-                await self._rollback()
-                if publication_attempt == 2:
-                    raise
-                # 回滚释放图谱锁后再次验证当前 Job 租约。失去所有权或取消会沿既有
-                # 控制路径退出；这里只重试已完成任务的发布，不重复调用 build。
-                await self._checkpoint()
+                await self._retry_publication(publication_attempt)
         job.result = {"graph_generation": state.graph_generation, "published": publishable}
         # 先在同一事务内将旧任务标为终态，释放唯一在途约束，再新增后继任务。
         # 中间不能提交，否则旧租约 guard 会拒绝新任务的检查点，造成永久 STALE。
         await self._finish(job, JobStatus.SUCCEEDED, commit=False)
         if not publishable and state.configuration.enabled and state.configuration.auto_build:
             await self._service.enqueue(job.security_scope_id, state.knowledge_base_id)
+        await self._checkpoint()
+
+    async def _publication_context(
+        self, job: IngestionJob,
+    ) -> tuple[KnowledgeBase, GraphState] | None:
+        """复读发布所需内容和图谱状态；删除或取消优先收尾，返回 None 表示已处理。"""
+        if job.knowledge_base_id is None:
+            await self._finish(job, JobStatus.CANCELLED)
+            return None
+        kb = await self._knowledge_bases.get(job.security_scope_id, job.knowledge_base_id)
+        state = await self._state(job)
+        if kb is None or kb.status != KnowledgeBaseStatus.READY or state is None:
+            await self._finish(job, JobStatus.CANCELLED)
+            return None
+        current_job = await self._jobs.get(job.security_scope_id, job.id)
+        if (
+            state.status == GraphStatus.CANCELLING or not state.configuration.enabled
+            or (current_job is not None and current_job.status == JobStatus.CANCEL_REQUESTED)
+        ):
+            await self._cancel(job, state)
+            return None
+        return kb, state
+
+    @staticmethod
+    def _obsolete(job: IngestionJob, kb: KnowledgeBase, state: GraphState) -> bool:
+        """按内容/目标修订及不可变构图策略判断旧结果；纯检索开关不废弃已付费构建。"""
+        return (
+            kb.revision != job.payload.get("content_revision")
+            or state.target_content_revision != job.payload.get("content_revision")
+            or state.configuration.profile_ref != job.payload.get("profile_ref")
+        )
+
+    async def _retry_publication(self, publication_attempt: int) -> None:
+        """回滚失效验收并复核租约，最多三次局部尝试；不清图或再次提交原生任务。"""
+        await self._rollback()
+        if publication_attempt == 2:
+            raise RagError("RAG-GRAPH-005", "图谱状态并发更新", 409, True)
         await self._checkpoint()
 
     async def _cancel(self, job: IngestionJob, state: GraphState) -> None:

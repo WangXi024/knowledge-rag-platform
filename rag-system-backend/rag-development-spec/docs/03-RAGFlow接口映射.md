@@ -50,6 +50,7 @@ PostgreSQL、Redis、对象存储或 Elasticsearch。
 | 图谱配置 | `GET /api/v1/datasets?id=...` 与 `PUT /api/v1/datasets/{dataset_id}` | 回读并合并受控 `parser_config.graphrag`，保留原有 Parser 配置 | 原生构图前应用不可变图谱策略；不直接改数据库 |
 | 原生构图/状态 | `POST/GET /api/v1/datasets/{dataset_id}/index?type=graph` | 提交及回读原生图谱任务 | 知识库级持久 Job 调度与恢复；提交受理不等于构图完成 |
 | 取消构图 | `DELETE /api/v1/datasets/{dataset_id}/index?type=graph&wipe=false` | 请求取消并保留已有图谱 | 只能报告受理；上游记录消失不能证明执行器已停止 |
+| 重建前清理旧图 | `DELETE /api/v1/datasets/{dataset_id}/index?type=graph&wipe=true` | 清除派生图产物和任务指针，保留普通文档与 Chunk | 仅在同一旧任务明确终态且本地互斥、恢复记录保护下使用；未知或运行任务不得清理 |
 | 读取图谱结构 | `GET /api/v1/datasets/{dataset_id}/graph` | 获取原生构图产生的节点和边 | 一期在线有界实体种子/一跳导航，随后同库回读原文 |
 | KG 聚合诊断 | `POST /api/v1/retrieval`，`use_kg=true` | 显式诊断官方 KG 检索 | 仅 `probe_kg_navigation` 使用，不进入一期在线问答 |
 
@@ -317,9 +318,11 @@ RAGFlow Chunk 字段映射：
 
 在不修改/Fork 上游、不改变模型或 Token 参数的约束下，一期在线采用明确版本化的
 `native_graph_read_v1`：先检查知识库 Scope、READY/内容代数与全部活动物理来源，
-再调用官方 Graph Read。仅处理完整的 **最多 256 个节点、1024 条边** 的图，按完整
-实体词匹配问题种子，扩展一跳邻居，所得实体名用于同库普通原文补召回。空图、
-无种子、结构无效或超限时降级；不将大图静默截断后当作完整导航结果。
+再调用官方 Graph Read，流式正文上限为 **4 MiB**。该版本上游已截取最多 **256 个
+节点、128 条边**，没有完整数量或截断标记；客户端因此拒绝节点数 **≥256** 或边数
+**≥128**，只接受最多 **255 个节点、127 条边**且结构校验通过的响应。按完整实体词
+匹配问题种子，扩展一跳邻居，所得实体名用于同库普通原文补召回。空图、无种子、
+结构无效或超限时降级；达到上游截取阈值的响应也不当作完整导航结果。
 
 在线路线 `ragflow:graph` 同时返回 `native_graph_structural_navigation`，并在
 `graph_diagnostics.mode` 声明 `native_graph_read_v1`。该模式进入精确/语义缓存边界，
@@ -330,6 +333,14 @@ RAGFlow Chunk 字段映射：
 `probe_kg_navigation` 只保留为显式的官方 KG 诊断能力，在线问答不调用它。原生构图
 仍需要实际可用的 Graph Chat，部署与知识库的图谱能力默认关闭。完整操作边界见
 [原生 GraphRAG 接入说明](../../docs/NATIVE_GRAPHRAG.md#5-检索来源与缓存边界)。
+
+删除原文后直接重建可能复用上游旧子图，保留已删除来源；实际联调已观察到该问题，
+来源边界必须拒绝该图。公开 `wipe=true` 可清理 graph/subgraph/entity/relation/
+community_report 和两个 KB 阶段完成标记，保留普通原文、Chunk 与通用模型缓存；
+独立 Redis 阶段 checkpoint 和 `ty2ents` 不在清理范围。当前 light 策略关闭 resolution/
+community 阶段。该接口没有任务身份条件或图谱锁，并会清空当前任务指针，因此只能
+在同一旧任务明确终态后、受本地互斥与持久恢复记录保护的重建准备阶段清理；不能把
+记录缺失视为终态，不能清理未知或运行任务，也不能把清理标记当作 POST 构图提交标记。
 
 ## 9. 健康与能力探测
 
