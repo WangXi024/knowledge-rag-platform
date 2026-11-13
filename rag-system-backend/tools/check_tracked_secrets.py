@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import os
 import re
 import shutil
 import stat
@@ -58,7 +60,11 @@ def _sensitive_values(repo_root: Path) -> set[bytes]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             name, value = line.split("=", 1)
-            encoded = value.strip().encode()
+            normalized = value.strip().strip("\"'")
+            # 首次启动前的生成占位值不是凭据，不能据此误报公开示例包含真实密钥。
+            if normalized.startswith(("change-me", "pending-")):
+                continue
+            encoded = normalized.encode()
             if SENSITIVE_NAME.search(name) and len(encoded) >= 8:
                 values.add(encoded)
     return values
@@ -75,9 +81,51 @@ def _assert_ignored(repo_root: Path, relative: Path) -> None:
         raise RuntimeError(f"local sensitive path is not Git-ignored: {relative}")
 
 
+def _assert_windows_private_permissions(path: Path) -> None:
+    """只读检查Windows DACL，拒绝当前用户、SYSTEM和本机管理员以外的允许项。
+
+    Windows的stat不能表达POSIX 0600；使用原生SID校验，绝不通过跳过检查掩盖权限问题。
+    PowerShell只接收文件路径，不接收或输出文件内容与密钥。
+    """
+    executable = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if executable is None:
+        raise RuntimeError("Windows ACL checker is unavailable")
+    script = r"""
+$ErrorActionPreference='Stop'
+$allowed=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544')
+$acl=Get-Acl -LiteralPath $env:RAG_PRIVATE_PERMISSION_PATH
+$owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+if ($owner -notin $allowed) { exit 1 }
+$rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+if ($rules.Count -eq 0) { exit 1 }
+foreach ($rule in $rules) {
+    if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) {
+        exit 1
+    }
+}
+exit 0
+"""
+    environment = dict(os.environ, RAG_PRIVATE_PERMISSION_PATH=str(path.resolve()))
+    # 从PowerShell7调用Windows PowerShell时，继承的模块路径可能指向不兼容版本。
+    if Path(executable).name.lower() == "powershell.exe":
+        environment.pop("PSModulePath", None)
+    result = subprocess.run(  # noqa: S603 - resolved PowerShell runs only the static ACL script
+        [executable, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+         base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+        env=environment, check=False, capture_output=True,
+    )
+    if result.returncode:
+        raise RuntimeError(f"local sensitive path has unverifiable Windows ACL: {path.name}")
+
+
 def _assert_private_permissions(repo_root: Path) -> None:
-    """在 POSIX 系统确认私钥只允许当前用户读取。"""
+    """按平台确认私有路径：POSIX检查0600，Windows检查原生ACL。"""
     secrets_dir = repo_root / ".secrets"
+    if os.name == "nt":
+        for path in (secrets_dir, *(repo_root / relative for relative in LOCAL_FILES)):
+            if path.exists():
+                _assert_windows_private_permissions(path)
+        return
     if secrets_dir.exists() and stat.S_IMODE(secrets_dir.stat().st_mode) & 0o077:
         raise RuntimeError(".secrets directory is accessible by group or others")
     for relative in (
@@ -97,15 +145,17 @@ def main() -> None:
             _assert_ignored(repo_root, relative)
     _assert_private_permissions(repo_root)
 
+    # monorepo从真实Git根扫描，不能只扫描后端而遗漏同时提交的前端文件。
+    git_root = Path(_run_git(repo_root, "rev-parse", "--show-toplevel").decode().strip())
     tracked = [
         item.decode()
-        for item in _run_git(repo_root, "ls-files", "-z").split(b"\0")
+        for item in _run_git(git_root, "ls-files", "-z").split(b"\0")
         if item
     ]
     sensitive_values = _sensitive_values(repo_root)
     violations: list[str] = []
     for relative in tracked:
-        path = repo_root / relative
+        path = git_root / relative
         if not path.is_file():
             continue
         content = path.read_bytes()

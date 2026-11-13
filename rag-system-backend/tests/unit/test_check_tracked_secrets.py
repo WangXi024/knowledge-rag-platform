@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
-from tools.check_tracked_secrets import SENSITIVE_NAME
+from pathlib import Path
+
+from tools.check_tracked_secrets import SENSITIVE_NAME, _sensitive_values
 
 
 def test_sensitive_name_matches_credentials_but_not_token_count_configuration() -> None:
@@ -18,3 +20,18 @@ def test_sensitive_name_matches_credentials_but_not_token_count_configuration() 
     assert SENSITIVE_NAME.search("JWT_PRIVATE_KEY")
     assert not SENSITIVE_NAME.search("LLM_MAX_OUTPUT_TOKENS_FIELD")
     assert not SENSITIVE_NAME.search("TOKENIZER_MODEL")
+
+
+def test_scan_samples_ignore_generation_placeholders_and_unquote_real_values(
+    tmp_path: Path,
+) -> None:
+    """生成占位值不冒充真实密钥；带引号的真实样本仍须按完整值匹配跟踪内容。"""
+    directory = tmp_path / "deploy/local"
+    directory.mkdir(parents=True)
+    (directory / ".env.ragflow").write_text(
+        "POSTGRES_PASSWORD=change-me-auto-generated\n"
+        "LLM_API_KEY='fixture-private-value-for-scan'\n"
+        "LLM_MODEL=public-model-name\n",
+        encoding="utf-8",
+    )
+    assert _sensitive_values(tmp_path) == {b"fixture-private-value-for-scan"}
