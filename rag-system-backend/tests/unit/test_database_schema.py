@@ -11,8 +11,12 @@ import pytest
 from rag_service.bootstrap.database_schema import (
     APP_ALEMBIC_HEAD,
     APP_INITIAL_TABLES,
+    APP_LEGACY_ALEMBIC_HEAD,
+    APP_LEGACY_SCHEMA_CHECKSUM,
+    APP_LEGACY_SCHEMA_RELEASE,
     APP_PREVIOUS_SCHEMA_CHECKSUM,
     APP_PREVIOUS_SCHEMA_RELEASE,
+    APP_PREVIOUS_TABLES,
     APP_RELEASE_COLUMNS,
     APP_SCHEMA_CHECKSUM,
     APP_SCHEMA_RELEASE,
@@ -42,7 +46,7 @@ def test_schema_check_cli_is_explicit_read_only_startup_command() -> None:
 
 
 def test_local_schema_plan_covers_empty_legacy_stamped_and_ready_states() -> None:
-    """local 自动准备只接受四条已知路径，并为每条路径选择唯一安全动作。"""
+    """逐级识别空库、未登记 0006、V1.0、V1.1 和 V1.2，不跳过历史迁移。"""
     empty = _classify_local_app_schema(
         actual_tables=frozenset(),
         revisions=(),
@@ -56,13 +60,21 @@ def test_local_schema_plan_covers_empty_legacy_stamped_and_ready_states() -> Non
             release_columns=frozenset({"version_num"}),
         )
     unstamped_head = _classify_local_app_schema(
-        actual_tables=APP_TABLES,
-        revisions=(APP_ALEMBIC_HEAD,),
+        actual_tables=APP_PREVIOUS_TABLES,
+        revisions=(APP_LEGACY_ALEMBIC_HEAD,),
         release_columns=frozenset({"version_num"}),
     )
+    upgrade_shared = _classify_local_app_schema(
+        actual_tables=APP_PREVIOUS_TABLES,
+        revisions=(APP_LEGACY_ALEMBIC_HEAD,),
+        release_columns=APP_RELEASE_COLUMNS,
+        release_version=APP_LEGACY_SCHEMA_RELEASE,
+        schema_checksum=APP_LEGACY_SCHEMA_CHECKSUM,
+        release_applied=True,
+    )
     upgrade = _classify_local_app_schema(
-        actual_tables=APP_TABLES,
-        revisions=(APP_ALEMBIC_HEAD,),
+        actual_tables=APP_PREVIOUS_TABLES,
+        revisions=(APP_LEGACY_ALEMBIC_HEAD,),
         release_columns=APP_RELEASE_COLUMNS,
         release_version=APP_PREVIOUS_SCHEMA_RELEASE,
         schema_checksum=APP_PREVIOUS_SCHEMA_CHECKSUM,
@@ -79,6 +91,7 @@ def test_local_schema_plan_covers_empty_legacy_stamped_and_ready_states() -> Non
 
     assert (empty.action, empty.revision) == ("migrate", None)
     assert unstamped_head.action == "stamp"
+    assert upgrade_shared.action == "upgrade_shared"
     assert upgrade.action == "upgrade"
     assert ready.action == "ready"
 
@@ -149,11 +162,11 @@ def test_permission_contract_is_strict_only_for_external_storage(monkeypatch) ->
 
 
 def test_expected_schema_fingerprint_matches_reviewed_install_package() -> None:
-    """锁定 V1.1.0 的 13 张应用表、0006 历史头和不可变摘要。"""
-    assert len(APP_TABLES) == 13
+    """锁定 V1.2.0 的 14 张应用表、0007 头和不可变摘要。"""
+    assert len(APP_TABLES) == 14
     assert len(RAGFLOW_TABLES) == 42
-    assert APP_ALEMBIC_HEAD == "0006_document_version_updates"
-    assert APP_SCHEMA_RELEASE == "V1.1.0"
+    assert APP_ALEMBIC_HEAD == "0007_native_graphrag"
+    assert APP_SCHEMA_RELEASE == "V1.2.0"
     # 摘要输入按“Schema、正式版本、历史头、排序后的表名”逐行编码，并保留末尾
     # 换行。这样 DBA、测试和启动门禁使用完全相同、可人工复算的固定规则。
     release_manifest = "\n".join(
@@ -177,7 +190,9 @@ def test_reviewed_install_sql_matches_runtime_schema_contract() -> None:
         repository_root / "migrations" / "rag_app" / "V1.0.0__init_schema.sql"
     ).read_text(encoding="utf-8")
 
-    flow_sql = (repository_root / "migrations/rag_flow/V0.26.4__init_schema.sql").read_text()
+    flow_sql = (repository_root / "migrations/rag_flow/V0.26.4__init_schema.sql").read_text(
+        encoding="utf-8"
+    )
     # 应用表没有引号标识符；RAGFlow 的 user 表使用双引号，因此分别捕获两种形式。
     app_tables = frozenset(re.findall(r"CREATE TABLE rag_app\.([a-z0-9_]+)", install_sql))
     ragflow_matches = re.findall(
@@ -186,14 +201,14 @@ def test_reviewed_install_sql_matches_runtime_schema_contract() -> None:
     )
     ragflow_tables = frozenset(quoted or plain for quoted, plain in ragflow_matches)
 
-    assert app_tables == APP_TABLES
+    assert app_tables == APP_PREVIOUS_TABLES
     assert ragflow_tables == RAGFLOW_TABLES
     assert "release_version character varying(32) NOT NULL" in install_sql
     assert "schema_checksum character(64) NOT NULL" in install_sql
     assert "INSERT INTO rag_app.alembic_version (" in install_sql
-    assert f"'{APP_ALEMBIC_HEAD}'" in install_sql
-    assert f"'{APP_PREVIOUS_SCHEMA_RELEASE}'" in install_sql
-    assert APP_PREVIOUS_SCHEMA_CHECKSUM in install_sql
+    assert f"'{APP_LEGACY_ALEMBIC_HEAD}'" in install_sql
+    assert f"'{APP_LEGACY_SCHEMA_RELEASE}'" in install_sql
+    assert APP_LEGACY_SCHEMA_CHECKSUM in install_sql
     for script in (install_sql, flow_sql):
         assert re.search(r"(?m)^(CREATE ROLE|CREATE DATABASE|GRANT |REVOKE )", script) is None
         assert "BEGIN;" in script and "COMMIT;" in script
@@ -214,8 +229,8 @@ def test_v1_release_stamp_sql_is_guarded_and_does_not_create_business_tables() -
     assert "CREATE TABLE rag_app." not in stamp_sql
     assert "current_database() <> 'rag_app'" in stamp_sql
     assert "0006_document_version_updates" in stamp_sql
-    assert f"'{APP_PREVIOUS_SCHEMA_RELEASE}'" in stamp_sql
-    assert APP_PREVIOUS_SCHEMA_CHECKSUM in stamp_sql
+    assert f"'{APP_LEGACY_SCHEMA_RELEASE}'" in stamp_sql
+    assert APP_LEGACY_SCHEMA_CHECKSUM in stamp_sql
     assert "BEGIN;" in stamp_sql
     assert "COMMIT;" in stamp_sql
 
@@ -233,9 +248,57 @@ def test_v11_release_sql_is_guarded_and_never_deletes_existing_data() -> None:
     assert "scope_type character varying(16) NOT NULL" in release_sql
     assert "resource_scope_id character(64) NOT NULL" in release_sql
     assert "V1.0.0" in release_sql
-    assert f"'{APP_SCHEMA_RELEASE}'" in release_sql
-    assert APP_SCHEMA_CHECKSUM in release_sql
+    assert f"'{APP_PREVIOUS_SCHEMA_RELEASE}'" in release_sql
+    assert APP_PREVIOUS_SCHEMA_CHECKSUM in release_sql
     assert "requires empty" in release_sql
     assert re.search(r"\b(DELETE FROM|TRUNCATE TABLE|DROP TABLE)\b", release_sql) is None
     assert "BEGIN;" in release_sql
     assert "COMMIT;" in release_sql
+
+
+def test_v12_release_sql_adds_graph_state_and_preserves_existing_business_data() -> None:
+    """新增状态和任务约束只能从 V1.1 前进；升级不得删除旧内容或隐式启用图谱。"""
+    repository_root = Path(__file__).resolve().parents[2]
+    release_sql = (
+        repository_root / "migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "current_database() <> 'rag_app'" in release_sql
+    assert f"current_release <> '{APP_PREVIOUS_SCHEMA_RELEASE}'" in release_sql
+    assert APP_PREVIOUS_SCHEMA_CHECKSUM in release_sql
+    assert f"version_num = '{APP_ALEMBIC_HEAD}'" in release_sql
+    assert f"release_version = '{APP_SCHEMA_RELEASE}'" in release_sql
+    assert APP_SCHEMA_CHECKSUM in release_sql
+    assert "PRIMARY KEY (security_scope_id, knowledge_base_id)" in release_sql
+    assert "REFERENCES rag_app.knowledge_base (security_scope_id, id)" in release_sql
+    assert "CREATE UNIQUE INDEX uk_graph_job_inflight" in release_sql
+    assert "job_type = 'GRAPH_BUILD'" in release_sql
+    assert "'GRAPH'" in release_sql
+    assert "INSERT INTO rag_app.graph_state" not in release_sql
+    assert re.search(r"\b(DELETE FROM|TRUNCATE TABLE|DROP TABLE)\b", release_sql) is None
+    assert "BEGIN;" in release_sql and "COMMIT;" in release_sql
+
+
+@pytest.mark.parametrize(
+    ("tables", "revision", "release", "checksum", "applied"),
+    [
+        (APP_TABLES, APP_ALEMBIC_HEAD, None, None, False),
+        (APP_PREVIOUS_TABLES, APP_LEGACY_ALEMBIC_HEAD, "V1.1.0", "f" * 64, True),
+        (APP_TABLES, APP_ALEMBIC_HEAD, APP_SCHEMA_RELEASE, APP_SCHEMA_CHECKSUM, False),
+        (
+            APP_TABLES, APP_ALEMBIC_HEAD,
+            APP_PREVIOUS_SCHEMA_RELEASE, APP_PREVIOUS_SCHEMA_CHECKSUM, True,
+        ),
+    ],
+)
+def test_local_schema_plan_never_restamps_unrecognized_graph_release(
+    tables: frozenset[str], revision: str, release: str | None,
+    checksum: str | None, applied: bool,
+) -> None:
+    """图谱版缺登记、摘要不符或版本混搭时必须拒绝，不把现场误判为可升级旧库。"""
+    with pytest.raises(RuntimeError, match="refused"):
+        _classify_local_app_schema(
+            actual_tables=tables, revisions=(revision,),
+            release_columns=APP_RELEASE_COLUMNS if release else frozenset({"version_num"}),
+            release_version=release, schema_checksum=checksum, release_applied=applied,
+        )

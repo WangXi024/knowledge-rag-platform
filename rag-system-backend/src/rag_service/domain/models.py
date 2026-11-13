@@ -78,6 +78,8 @@ class JobType(StrEnum):
     DELETE_DOCUMENT = "DELETE_DOCUMENT"
     DELETE_KB = "DELETE_KB"
     CLEANUP = "CLEANUP"
+    # 原生图谱是知识库级派生任务，与逐文档解析的 READY 状态独立。
+    GRAPH_BUILD = "GRAPH_BUILD"
 
 
 class DocumentVersionStatus(StrEnum):

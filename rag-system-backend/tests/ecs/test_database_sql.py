@@ -108,6 +108,32 @@ def test_canonical_sql_install_guards_comments_and_access(monkeypatch: pytest.Mo
                         assert connection.execute(
                             "SELECT release_version FROM rag_app.alembic_version"
                         ).fetchone() == ("V1.1.0",)
+                        graph_upgrade = (
+                            ROOT / "migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql"
+                        ).read_text(encoding="utf-8")
+                        # V1.1→V1.2 允许保留业务行；迁移既不清空知识库，也不自动启用图谱。
+                        connection.execute(
+                            "INSERT INTO rag_app.knowledge_base "
+                            "(id,security_scope_id,scope_type,status,name,parser_profile_ref,"
+                            "chunk_profile_ref,embedding_profile_ref,retrieval_profile_ref) VALUES "
+                            "('00000000-0000-0000-0000-000000000012',repeat('c',64),'TENANT','READY',"
+                            "'preserved-v11-fixture','p@1','c@1','e@1','r@1')"
+                        )
+                        connection.execute(graph_upgrade)
+                        assert connection.execute(
+                            "SELECT name,revision FROM rag_app.knowledge_base "
+                            "WHERE id='00000000-0000-0000-0000-000000000012'"
+                        ).fetchone() == ("preserved-v11-fixture", 0)
+                        assert connection.execute(
+                            "SELECT count(*) FROM rag_app.graph_state"
+                        ).fetchone() == (0,)
+                        assert connection.execute(
+                            "SELECT release_version FROM rag_app.alembic_version"
+                        ).fetchone() == ("V1.2.0",)
+                        # 重复应用版本有明确拒绝，失败事务不能覆盖已升级的结构和业务行。
+                        with pytest.raises(psycopg.Error, match="V1.1.0 baseline"):
+                            connection.execute(graph_upgrade)
+                        connection.execute("ROLLBACK")
                     connection.execute((SUPPORT / f"03_{name}_comments.sql").read_text())
                     verification = (SUPPORT / f"04_verify_{name}.sql").read_text()
                     expected = re.findall(

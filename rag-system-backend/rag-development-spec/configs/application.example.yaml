@@ -211,6 +211,7 @@ profiles:
     - retrieval_profiles.example.yaml
     - model_profiles.example.yaml
     - prompts.example.yaml
+    - graph_profiles.example.yaml
   import_on_bootstrap: true
   runtime_source: database
   conflict_policy: fail

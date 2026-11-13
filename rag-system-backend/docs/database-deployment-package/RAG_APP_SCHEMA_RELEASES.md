@@ -5,6 +5,23 @@
 本文只描述 `rag_app`。它把开发期的六次 Alembic 演进冻结为正式发布基线
 `V1.0.0`，后续数据库变更改为 DBA 审核并人工执行增量 SQL。
 
+## V1.2.0 原生图谱状态
+
+当前应用要求 `V1.2.0 / 0007_native_graphrag`，共 14 张表（含版本表）。新增
+`graph_state` 以 `(security_scope_id, knowledge_base_id)` 为复合主键并指向同 Scope
+知识库；配置版本、内容版本、图谱代数与乐观行版本分别保存。`GRAPH` 配置和
+`GRAPH_BUILD` 任务通过数据库约束验收，同一资源知识库只能有一项在途构图。
+
+已有 V1.1.0 数据库执行
+`migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql`。该事务允许保留已有
+知识库、文档与审计，不创建默认状态行、不自动开启或触发构图。失败时完整回滚，
+重复执行则拒绝；不提供删除状态表的降级，灾备恢复使用事先验证的完整备份。
+
+全新库按 `V1.0.0__init_schema.sql` → `V1.0.0__to__V1.1.0__shared_knowledge_bases.sql`
+→ `V1.1.0__to__V1.2.0__native_graphrag.sql` 顺序安装。V1.0→V1.1 对带业务数据的
+限制继续生效，不通过清空数据绕过。`local` 入口只识别上述已知链，`external` 必须
+由 DBA 执行 SQL，再由应用只读验收；历史迁移保持冻结。具体命令以当前 ECS 入口为准。
+
 ## V1.0.0 基线
 
 V1.0.0 包含 13 张表：`alembic_version`、`knowledge_base`、`document_record`、

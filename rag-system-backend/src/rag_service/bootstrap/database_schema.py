@@ -1,7 +1,7 @@
 """准备本地 PostgreSQL Schema，并只读校验所有存储模式的结构与所有权边界。
 
 ``local`` 模式供本地开发使用：启动脚本会先执行冻结 SQL、登记兼容的
-V1.0.0 基线，再执行仓库评审的 V1.1.0 增量 SQL。该写入入口显式拒绝 ``external``，
+V1.0.0 基线，再顺序执行评审的 V1.1.0、V1.2.0 增量 SQL。该写入入口显式拒绝 ``external``，
 且在表集合、历史版本、发布字段或待清理数据不满足前置条件时停止。所有模式随后仍
 执行同一套只读门禁。外部数据库继续完全由 DBA 执行评审 SQL。
 """
@@ -18,17 +18,21 @@ from psycopg import sql
 from sqlalchemy.engine import make_url
 
 APP_SCHEMA = "rag_app"
-APP_ALEMBIC_HEAD = "0006_document_version_updates"
-APP_PREVIOUS_SCHEMA_RELEASE = "V1.0.0"
-APP_PREVIOUS_SCHEMA_CHECKSUM = "427e6747cf6054d521ad3b292b81a4721612e43494e1560794a821f8bfed83d3"
-APP_SCHEMA_RELEASE = "V1.1.0"
-# 该摘要来自“Schema 名 + 发布版本 + Alembic 头 + 13 张基础表”的规范化清单。
+APP_LEGACY_ALEMBIC_HEAD = "0006_document_version_updates"
+APP_ALEMBIC_HEAD = "0007_native_graphrag"
+APP_LEGACY_SCHEMA_RELEASE = "V1.0.0"
+APP_LEGACY_SCHEMA_CHECKSUM = "427e6747cf6054d521ad3b292b81a4721612e43494e1560794a821f8bfed83d3"
+APP_PREVIOUS_SCHEMA_RELEASE = "V1.1.0"
+APP_PREVIOUS_SCHEMA_CHECKSUM = "6f61654d651c73816a9dd85db3a55bfbd8f5ab5f1296908de60d93aa873f3109"
+APP_SCHEMA_RELEASE = "V1.2.0"
+# 该摘要来自“Schema 名 + 发布版本 + Alembic 头 + 14 张应用表”的规范化清单。
 # 启动门禁只比较固定值，不在运行时重新生成，避免不同平台的序列化差异。
-APP_SCHEMA_CHECKSUM = "6f61654d651c73816a9dd85db3a55bfbd8f5ab5f1296908de60d93aa873f3109"
-APP_LOCAL_RELEASE_SQL = "V1.0.0__to__V1.1.0__shared_knowledge_bases.sql"
+APP_SCHEMA_CHECKSUM = "b8b9d47888f009e8b1800eab08092eef3227cbff69b50a81f7a51746e3833c49"
+APP_SHARED_RELEASE_SQL = "V1.0.0__to__V1.1.0__shared_knowledge_bases.sql"
+APP_LOCAL_RELEASE_SQL = "V1.1.0__to__V1.2.0__native_graphrag.sql"
 APP_RELEASE_COLUMNS = frozenset({"version_num", "release_version", "schema_checksum", "applied_at"})
 APP_RELEASE_METADATA_COLUMNS = APP_RELEASE_COLUMNS - {"version_num"}
-APP_TABLES = frozenset(
+APP_PREVIOUS_TABLES = frozenset(
     {
         "alembic_version",
         "citation_record",
@@ -45,6 +49,7 @@ APP_TABLES = frozenset(
         "query_record",
     }
 )
+APP_TABLES = APP_PREVIOUS_TABLES | {"graph_state"}
 # 开发期旧卷可能停留在任一已发布的 Alembic Revision。下面的精确表集合只用于在
 # 自动升级前识别“合法旧版本”；如果版本号与表集合互相矛盾，就把现场留给开发者
 # 检查，而不是猜测应该补表还是改版本号。
@@ -69,6 +74,7 @@ APP_TABLES_BY_REVISION = {
     | {"document_entity", "document_index_node", "entity_relation"},
     "0005_allow_section_index_nodes": APP_INITIAL_TABLES
     | {"document_entity", "document_index_node", "entity_relation"},
+    APP_LEGACY_ALEMBIC_HEAD: APP_PREVIOUS_TABLES,
     APP_ALEMBIC_HEAD: APP_TABLES,
 }
 RAGFLOW_TABLES = frozenset(
@@ -138,8 +144,8 @@ class SchemaCheckResult:
 class LocalSchemaPlan:
     """本地 Schema 当前可执行的唯一安全动作。
 
-    ``action`` 只会是 ``migrate``、``stamp``、``upgrade`` 或 ``ready``：分别表示运行
-    现有迁移、登记旧基线、执行正式增量 SQL、以及无需写入。
+    ``action`` 为 ``migrate``、``stamp``、``upgrade_shared``、``upgrade`` 或 ``ready``：
+    分别表示冻结初始 SQL、登记旧基线、共享库升级、图谱增量升级、以及无需写入。
     """
 
     action: str
@@ -158,8 +164,8 @@ def _classify_local_app_schema(
     """根据只读目录快照决定本地库是否可迁移、可盖章或已经就绪。
 
     参数是系统目录查询的脱敏结果；函数本身不连接数据库、不执行 DDL。空库可以进入
-    冻结 SQL，合法旧 Revision 必须与当时的精确表集合一致，0006 只能在发布字段全部
-    缺失时盖章。任何部分字段、未知版本、额外表或错误摘要都会抛错并保留现场。
+    冻结 SQL，合法旧 Revision 必须与当时的精确表集合一致，只有旧 0006 能在发布字段
+    全部缺失时盖章。V1.0、V1.1 逐级升级，任何未知版本或错误摘要都拒绝并保留现场。
     """
     if not actual_tables:
         if revisions or release_columns:
@@ -194,7 +200,7 @@ def _classify_local_app_schema(
         raise RuntimeError(
             f"local rag_app has a partial release stamp ({columns}); automatic repair was refused"
         )
-    if revision != APP_ALEMBIC_HEAD:
+    if revision not in {APP_LEGACY_ALEMBIC_HEAD, APP_ALEMBIC_HEAD}:
         if present_release_columns:
             raise RuntimeError(
                 f"local rag_app revision {revision} already has release metadata; "
@@ -206,17 +212,32 @@ def _classify_local_app_schema(
         )
 
     if not present_release_columns:
-        return LocalSchemaPlan(action="stamp", revision=revision)
+        if revision == APP_LEGACY_ALEMBIC_HEAD:
+            return LocalSchemaPlan(action="stamp", revision=revision)
+        raise RuntimeError(
+            "local rag_app current revision lacks release metadata; repair was refused"
+        )
     if not release_applied:
         raise RuntimeError(
             "local rag_app release timestamp is missing; automatic overwrite was refused"
         )
     if (
-        release_version == APP_PREVIOUS_SCHEMA_RELEASE
+        revision == APP_LEGACY_ALEMBIC_HEAD
+        and release_version == APP_LEGACY_SCHEMA_RELEASE
+        and schema_checksum == APP_LEGACY_SCHEMA_CHECKSUM
+    ):
+        return LocalSchemaPlan(action="upgrade_shared", revision=revision)
+    if (
+        revision == APP_LEGACY_ALEMBIC_HEAD
+        and release_version == APP_PREVIOUS_SCHEMA_RELEASE
         and schema_checksum == APP_PREVIOUS_SCHEMA_CHECKSUM
     ):
         return LocalSchemaPlan(action="upgrade", revision=revision)
-    if release_version != APP_SCHEMA_RELEASE or schema_checksum != APP_SCHEMA_CHECKSUM:
+    if (
+        revision != APP_ALEMBIC_HEAD
+        or release_version != APP_SCHEMA_RELEASE
+        or schema_checksum != APP_SCHEMA_CHECKSUM
+    ):
         raise RuntimeError(
             f"local rag_app release metadata does not match {APP_SCHEMA_RELEASE}; "
             "automatic overwrite was refused"
@@ -357,10 +378,10 @@ def _required_environment(name: str) -> str:
 
 
 async def prepare_local_app_database_schema() -> dict[str, object]:
-    """在显式 local 模式准备应用库；空库和 0006/V1.0/V1.1 复用同一纯 SQL 链。
+    """在显式 local 模式准备应用库；空库和 0006/V1.0/V1.1/V1.2 复用安全 SQL 链。
 
     旧的 alembic_version 是兼容版本表，绝不因取消 Alembic 删除其数据。更早版本和
-    半成品结构拒绝自动处理；V1.1 升级对有业务数据的 V1.0 库继续安全拒绝。
+    半成品结构拒绝自动处理；V1.1 对带数据的 V1.0 库继续拒绝，V1.1 到 V1.2 无损追加。
     """
     if os.environ.get("RAG_STORAGE_MODE", "").strip().lower() != "local":
         raise RuntimeError(
@@ -378,6 +399,7 @@ async def prepare_local_app_database_schema() -> dict[str, object]:
         files = {
             "migrate": "V1.0.0__init_schema.sql",
             "stamp": "V1.0.0__stamp_existing_schema.sql",
+            "upgrade_shared": APP_SHARED_RELEASE_SQL,
             "upgrade": APP_LOCAL_RELEASE_SQL,
         }
         while plan.action != "ready":

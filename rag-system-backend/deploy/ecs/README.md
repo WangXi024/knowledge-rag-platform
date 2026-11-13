@@ -20,7 +20,8 @@ migrations/
 ├── rag_app/
 │   ├── V1.0.0__init_schema.sql
 │   ├── V1.0.0__stamp_existing_schema.sql
-│   └── V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+│   ├── V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+│   └── V1.1.0__to__V1.2.0__native_graphrag.sql
 └── rag_flow/
     └── V0.26.4__init_schema.sql
 deploy/
@@ -53,8 +54,9 @@ tests/ecs/
 和结构验收由 `database/` 配合完成。迁移只携带结构和版本标记，不含账号、模型或业务数据。
 数据库账号/权限阶段与应用发布阶段独立，普通 release 不运行迁移或注释 SQL。
 
-`rag_app.alembic_version` 保留原名称和历史头 `0006_document_version_updates`，避免破坏
-已有数据库。它现在是 SQL 发布版本表，运行期已不依赖 Alembic，不能手改版本伪造升级。
+`rag_app.alembic_version` 保留原名称。V1.0/V1.1 记录历史头
+`0006_document_version_updates`，V1.2 增量升级后记录 `0007_native_graphrag`。
+它现在是 SQL 发布版本表，运行期已不依赖 Alembic，不能手改版本伪造升级。
 原 Python 迁移历史保存在改造前 Git 检查点 `335d418ae86671a7617d21017d10feb8d323c22b`。
 
 ## 2. 运行拓扑和前置条件
@@ -110,19 +112,21 @@ ECS 不创建 Store、专用 Bucket 或共享服务权限，也不安装软件�
 | 2 | rag_app 与 rag_flow / 实例管理员 | 两库各执行 `02_database_permissions.pgadmin.sql`；只修改本系统库权限 |
 | 3 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__init_schema.sql`：仅全新空库，创建 13 张表及 V1.0.0 版本 |
 | 4 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__to__V1.1.0__shared_knowledge_bases.sql`：升级共享知识库结构，登记 V1.1.0 |
-| 5 | rag_flow / lazytt_rag | `migrations/rag_flow/V0.26.4__init_schema.sql`：仅全新空库，创建 42 张表及相关结构 |
-| 6 | 对应业务库 / lazytt_rag | `03_rag_app_comments.sql`、`03_rag_flow_comments.sql`：补充中文注释 |
-| 7 | 对应业务库 / lazytt_rag | `04_verify_rag_app.sql`、`04_verify_rag_flow.sql`：只读验收，返回 verified |
-| 8 | postgres / 实例管理员 | `05_verify_database_access.sql`：检查自身两库授权和其他业务库 CONNECT 隔离 |
+| 5 | rag_app / lazytt_rag | `migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql`：保留现有业务数据，新增图谱状态、GRAPH 类型与单在途任务约束，登记 V1.2.0 |
+| 6 | rag_flow / lazytt_rag | `migrations/rag_flow/V0.26.4__init_schema.sql`：仅全新空库，创建 42 张表及相关结构 |
+| 7 | 对应业务库 / lazytt_rag | `03_rag_app_comments.sql`、`03_rag_flow_comments.sql`：补充中文注释；图谱字段注释由 V1.2 增量 SQL 携带 |
+| 8 | 对应业务库 / lazytt_rag | `04_verify_rag_app.sql`、`04_verify_rag_flow.sql`：只读验收，返回 verified |
+| 9 | postgres / 实例管理员 | `05_verify_database_access.sql`：检查自身两库授权和其他业务库 CONNECT 隔离 |
 
-管理员连接业务库后，步骤 3～7 先 `SET ROLE lazytt_rag;`，完成后 `RESET ROLE;`。
+管理员连接业务库后，步骤 3～8 先 `SET ROLE lazytt_rag;`，完成后 `RESET ROLE;`。
 本系统按既有契约共用一个业务所有者 `lazytt_rag`，两库之间允许该身份访问；不得让它有
 SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS。跨其他库的 PUBLIC CONNECT
-若仍存在，第 8 步会报错；由管理员另行审阅共享 ACL，不由本脚本批量撤销其他系统权限。
+若仍存在，第 9 步会报错；由管理员另行审阅共享 ACL，不由本脚本批量撤销其他系统权限。
 
 已有库按实际版本分支执行：
 
-- 已是 V1.1.0：跳过初始化和增量迁移，复核结构、注释及权限。
+- 已是 V1.2.0：跳过初始化和增量迁移，复核结构、注释及权限。
+- 已是 V1.1.0：只执行 V1.1→V1.2 增量 SQL，允许保留现有知识库/文档数据；既有知识库图谱保持关闭。
 - 0006 完整旧结构、缺少全部发布元数据：只执行 `V1.0.0__stamp_existing_schema.sql`，
   之后按 V1.0.0 处理。不能给部分元数据、未知结构或 V1.1.0 重新盖章。
 - V1.0.0：升级脚本要求知识资源、Job、查询、反馈和幂等表为空。有旧业务数据时会拒绝，
@@ -183,11 +187,12 @@ GHCR 私有包需本次受限会话的有效登录。可临时设置 `DOCKER_CON
 ```bash
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__init_schema.sql
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+"${candidate[@]}" --mode migrate --database rag_app --sql V1.1.0__to__V1.2.0__native_graphrag.sql
 "${candidate[@]}" --mode migrate --database rag_flow --sql V0.26.4__init_schema.sql
 ```
 
 这些命令只使用内存中的候选 Compose，保留已有运行 Compose，不启动常驻服务。注释与
-验收继续在 pgAdmin 使用上节步骤 6～8 完成，不另复制进应用镜像。
+验收继续在 pgAdmin 使用上节步骤 7～9 完成，不另复制进应用镜像。
 
 ## 6. 首次账号、模型与发布
 

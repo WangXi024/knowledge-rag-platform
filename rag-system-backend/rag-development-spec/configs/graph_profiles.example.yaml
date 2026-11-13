@@ -1,0 +1,11 @@
+# 原生图谱不可变策略。修改构图语义必须新增版本，不能覆盖已导入的同名同版本。
+schema_version: 1
+profiles:
+  - ref: native-graph-light@1
+    enabled: true
+    description: RAGFlow v0.26.4 轻量实体关系构图，社区聚合不作为一期回答证据
+    contract_version: v0.26.4
+    method: light
+    entity_types: [organization, person, geo, event, category]
+    community: false
+    resolution: false
