@@ -306,19 +306,36 @@ async def test_snapshot_returns_only_names_and_counts() -> None:
 
 
 async def test_cancel_preserves_graph_and_does_not_invent_terminal_state() -> None:
-    """DELETE 明确传 wipe=false；上游随即清空任务，只报告取消请求已受理。"""
+    """回放真实 API-only 取消响应；任务记录消失不代表未运行的 executor 已获终止确认。"""
+    path = Path(__file__).parents[1] / "fixtures" / "ragflow-v0.26.4-native-cancellation.json"
+    recorded = json.loads(path.read_text(encoding="utf-8-sig"))
+    assert recorded["version"] == "v0.26.4" and recorded["synthetic_only"] is True
+    assert recorded["api_only"] is True and recorded["executor_running"] is False
+    assert recorded["missing_task_is_not_termination"] is True
+    assert recorded["build"]["body"] == {"code": 0, "data": {"task_id": "task-1"}}
+    assert recorded["cancel"]["body"] == recorded["after_cancel"]["body"] == {"code": 0, "data": {}}
+    responses = iter((recorded["build"], recorded["cancel"], recorded["after_cancel"]))
+    served = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """测试官方取消控制参数，响应和随后空任务均不伪造 CANCELLED。"""
+        """严格匹配原始 method/path/query 并回放实际 HTTP 状态和原始官方 body。"""
+        nonlocal served
+        response = next(responses)
+        assert request.method == response["method"]
+        assert request.url.path == response["path"]
+        assert request.url.query.decode("ascii") == response["query"]
+        assert response["status"] == 200 and response["elapsed_ms"] >= 0
         if request.method == "DELETE":
             assert dict(request.url.params) == {"type": "graph", "wipe": "false"}
-        else:
-            assert request.method == "GET"
-        return _ok({})
+        served += 1
+        return httpx.Response(response["status"], json=response["body"])
 
     async with _fixture(handler) as fixture:
+        task = await fixture.adapter.build(_SCOPE, _KB_ID, 5)
+        assert task.engine_task_id == "task-1" and task.status == GraphStatus.QUEUED
         assert await fixture.adapter.cancel(_SCOPE, _KB_ID, 5) is None
         assert await fixture.adapter.task(_SCOPE, _KB_ID, 5) is None
+        assert served == 3 and not task.cancelled
         assert all("/graph" not in request.url.path for request in fixture.requests)
 
 
