@@ -425,6 +425,17 @@ class QueryPlanData(ApiModel):
     context_top_n: int | None = Field(default=None, ge=1)
 
 
+class GraphRetrievalDiagnostics(ApiModel):
+    """仅包含图谱模式、版本和计数，不公开安全摘要、引擎ID、模型密钥或聚合正文。"""
+
+    mode: str
+    version_hash: str
+    generations: dict[str, int] = Field(default_factory=dict)
+    query_count: int = Field(default=0, ge=0)
+    source_candidate_count: int = Field(default=0, ge=0)
+    elapsed_ms: float = Field(default=0, ge=0)
+
+
 class RetrievalData(ApiModel):
     """原始/生效查询、查询计划、候选集合、总数和降级警告。"""
     original_query: str
@@ -433,6 +444,7 @@ class RetrievalData(ApiModel):
     candidates: list[RetrievalCandidateData]
     total: int = Field(ge=0)
     warnings: list[str] = Field(default_factory=list)
+    graph_diagnostics: GraphRetrievalDiagnostics | None = None
 
 
 class RetrievalResponse(ApiModel):

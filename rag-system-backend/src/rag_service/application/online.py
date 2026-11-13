@@ -29,6 +29,7 @@ from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.cache import cache_id, knowledge_base_revisions_hash, metadata_filter_hash
 from rag_service.domain.errors import LlmError, RagError, ResourceNotFoundError
+from rag_service.domain.graph import GraphPort, GraphRepository, GraphState, GraphStatus
 from rag_service.domain.models import (
     AnswerOutcome,
     Citation,
@@ -70,6 +71,9 @@ _CITATION_LABEL = re.compile(r"\[C([1-9][0-9]*)\]")
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _ANSWER_PROMPT_PROFILE = "rag-answer-localized@1"
 _CITATION_REPAIR_PROMPT_PROFILE = "citation-repair-localized@1"
+# 图谱为可选增强，限制整条路线预算，避免多知识库请求串行放大模型调用和等待时间。
+_NATIVE_GRAPH_MAX_KBS = 2
+_NATIVE_GRAPH_TIMEOUT_SECONDS = 8.0
 _RESPONSE_LANGUAGE_NAMES = {
     "zh-CN": "Simplified Chinese (简体中文)",
     "en-US": "English",
@@ -77,8 +81,7 @@ _RESPONSE_LANGUAGE_NAMES = {
 _NO_EVIDENCE_ANSWERS = {
     "zh-CN": "当前知识库中没有足够证据确认该问题",
     "en-US": (
-        "The current knowledge base does not contain enough evidence "
-        "to answer this question."
+        "The current knowledge base does not contain enough evidence to answer this question."
     ),
 }
 _LANGUAGE_ZH = "zh-CN"
@@ -102,6 +105,7 @@ def _elapsed_ms(started_at: float) -> float:
 @dataclass(frozen=True, slots=True)
 class HistoryMessage:
     """参与查询改写和回答的一条有限对话历史。"""
+
     role: str
     content: str
 
@@ -112,6 +116,7 @@ class RetrievalInput:
 
     该标记由可信路由设置，不接受请求体覆盖；问答内部复用检索时保持现有共享库策略。
     """
+
     knowledge_base_ids: tuple[UUID, ...]
     query: str
     document_ids: tuple[UUID, ...] = ()
@@ -127,6 +132,7 @@ class RetrievalInput:
 @dataclass(frozen=True, slots=True)
 class QueryPlan:
     """语言识别、问题类型、双语改写和针对知识语种选出的生效查询。"""
+
     original_query: str
     detected_language: str
     query_zh: str | None
@@ -149,6 +155,7 @@ class QueryPlan:
 @dataclass(frozen=True, slots=True)
 class KnowledgeLanguageProfile:
     """目标文档集合的已知语种、主语种和未知语种文档数量。"""
+
     languages: tuple[str, ...]
     primary_language: str | None
     unknown_documents: int = 0
@@ -157,10 +164,27 @@ class KnowledgeLanguageProfile:
 @dataclass(frozen=True, slots=True)
 class RetrievalRoute:
     """一条独立检索路线：查询文本、纯向量/纯关键词模式及 RRF 权重。"""
+
     name: str
     question: str
     vector_similarity_weight: float
     rrf_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class NativeGraphPlan:
+    """一次请求冻结的图谱路由与缓存版本；导航输出仍须重新走普通原文检索。
+
+    该对象只由服务端知识库状态生成，不接受浏览器任意字段；``cacheable`` 在
+    状态读取、来源边界或图谱服务失败时关闭，避免把临时降级答案写入正常图谱缓存。
+    """
+
+    targets: tuple[tuple[KnowledgeBase, GraphState], ...] = ()
+    version_hash: str = "none"
+    mode: str = "off"
+    warnings: tuple[str, ...] = ()
+    cacheable: bool = True
+    elapsed_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +196,7 @@ class RetrievalOutput:
     ``context_top_n`` 是问答阶段最多交给 LLM 的证据块数。三者分别对应“先广泛
     召回、再精排、最后控制上下文”的不同阶段，不能用最终 ``total`` 反推。
     """
+
     original_query: str
     effective_query: str
     candidates: tuple[RetrievalCandidate, ...]
@@ -185,11 +210,19 @@ class RetrievalOutput:
     retrieval_top_k: int | None = None
     rerank_top_n: int | None = None
     context_top_n: int | None = None
+    graph_version_hash: str = "none"
+    graph_mode: str = "off"
+    graph_cacheable: bool = True
+    graph_generations: dict[str, int] = field(default_factory=dict)
+    graph_query_count: int = 0
+    graph_source_candidate_count: int = 0
+    graph_elapsed_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class AnswerInput:
     """问答输入，额外包含生成 Profile、响应语言和稳定请求 ID。"""
+
     knowledge_base_ids: tuple[UUID, ...]
     query: str
     messages: tuple[HistoryMessage, ...] = ()
@@ -209,6 +242,7 @@ class AnswerOutput:
     动态检索字段随答案一起保存到缓存，因此命中缓存后仍能解释原答案当时使用的
     问题类型和三阶段预算。旧缓存没有这些字段时保持 ``None``，避免伪造运行参数。
     """
+
     answer: str
     outcome: AnswerOutcome
     citations: tuple[Citation, ...]
@@ -232,6 +266,7 @@ class AnswerOutput:
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
     """应用层流式事件；API 层再把它编码成 SSE。"""
+
     event: str
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -267,6 +302,7 @@ def normalize_query(value: str, max_chars: int) -> str:
 
 class OnlineService:
     """编排低延迟检索、完整问答、流式问答与在线审计的应用服务。"""
+
     def __init__(
         self,
         knowledge_bases: KnowledgeBaseRepository,
@@ -285,6 +321,9 @@ class OnlineService:
         index_nodes: IndexNodeRepository | None = None,
         entity_graph: EntityGraphRepository | None = None,
         access_policy: KnowledgeBaseAccessPolicy | None = None,
+        graphs: GraphRepository | None = None,
+        native_graph: GraphPort | None = None,
+        graph_enabled: bool = False,
     ) -> None:
         """注入资源仓库、模型端口、Profile、缓存和审计仓库。
 
@@ -310,6 +349,9 @@ class OnlineService:
         self._index_nodes = index_nodes
         self._entity_graph = entity_graph
         self._access_policy = access_policy or SharedKnowledgeBaseAccessPolicy()
+        self._graphs = graphs
+        self._native_graph = native_graph
+        self._graph_enabled = graph_enabled
 
     async def execute_idempotent(
         self,
@@ -339,6 +381,8 @@ class OnlineService:
         self,
         security: SecurityContext,
         value: RetrievalInput,
+        *,
+        native_graph_plan: NativeGraphPlan | None = None,
     ) -> RetrievalOutput:
         """执行双语多路线检索、阈值回退、RRF 融合、去重和可选重排。
 
@@ -352,6 +396,11 @@ class OnlineService:
             tenant_only=value.tenant_only,
         )
         original_query = normalize_query(value.query, self._app_settings.max_query_chars)
+        graph_plan = native_graph_plan or await self._native_graph_plan(
+            knowledge_bases,
+            metadata_filter=value.metadata_filter,
+            document_ids=value.document_ids,
+        )
         language_profile = await self._knowledge_language_profile(
             security,
             knowledge_bases,
@@ -374,12 +423,8 @@ class OnlineService:
             _integer(ragflow, "page_size"),
         )
         route_top_k = int(adaptive.get("top_k", _integer(ragflow, "top_k")))
-        rerank_top_n = int(
-            adaptive.get("rerank_top_n", _integer(postprocess, "rerank_top_n"))
-        )
-        context_top_n = int(
-            adaptive.get("context_top_n", _integer(postprocess, "context_top_n"))
-        )
+        rerank_top_n = int(adaptive.get("rerank_top_n", _integer(postprocess, "rerank_top_n")))
+        context_top_n = int(adaptive.get("context_top_n", _integer(postprocess, "context_top_n")))
         # 多路线并发检索后以 RRF 合并，同一块在多路线排名靠前会获得更高综合分。
         candidates = await self._hybrid_rrf(
             security=security,
@@ -392,7 +437,7 @@ class OnlineService:
             metadata_filter=value.metadata_filter,
             rrf_k=_integer(rrf, "k"),
         )
-        warnings = list(rewrite_warnings)
+        warnings = [*rewrite_warnings, *graph_plan.warnings]
         if language_profile.unknown_documents:
             warnings.append("knowledge_language_unknown_dual_route")
         if not candidates and bool(fallback.get("enabled", False)):
@@ -408,6 +453,24 @@ class OnlineService:
                 rrf_k=_integer(rrf, "k"),
             )
             warnings.append("retrieval_threshold_fallback")
+
+        # 原生 KG 只提供导航。每个目标库在整次请求中至多调用一次 navigate，不因
+        # 中英文或阈值回退重复调用收费模型；补召回仍使用原有普通 Chunk 引擎端口。
+        native_started_at = time.perf_counter()
+        native_candidates, native_warnings, native_routes, graph_query_count = (
+            await self._native_graph_candidates(
+            security,
+            graph_plan,
+            query_plan.effective_query,
+            page_size=max(requested_page_size, rerank_top_n),
+            top_k=route_top_k,
+            threshold=_number(ragflow, "similarity_threshold"),
+            rrf_k=_integer(rrf, "k"),
+            )
+        )
+        native_elapsed_ms = _elapsed_ms(native_started_at)
+        candidates = _merge_candidate_routes(candidates, native_candidates)
+        warnings.extend(native_warnings)
 
         # 多粒度索引只负责把概览、清单、比较和多跳问题导航到代表性原始 Chunk；
         # Parent-Child 再为已召回子块补回同组相邻证据。侧车没有复制 RAGFlow 的
@@ -461,9 +524,7 @@ class OnlineService:
             for resource_scope_id, scoped_kbs in self._resource_groups(knowledge_bases):
                 scoped_candidates = await self._entity_graph_candidates(
                     security.for_resource_scope(resource_scope_id),
-                    " ".join(
-                        dict.fromkeys((original_query, *query_plan.variants.values()))
-                    ),
+                    " ".join(dict.fromkeys((original_query, *query_plan.variants.values()))),
                     tuple(item.id for item in scoped_kbs),
                     value.document_ids,
                     profile,
@@ -481,9 +542,7 @@ class OnlineService:
                 scoped_candidates = await self._parent_child_candidates(
                     security.for_resource_scope(resource_scope_id),
                     tuple(
-                        item
-                        for item in candidates
-                        if item.resource_scope_id == resource_scope_id
+                        item for item in candidates if item.resource_scope_id == resource_scope_id
                     ),
                     tuple(item.id for item in scoped_kbs),
                     profile,
@@ -545,11 +604,27 @@ class OnlineService:
             query_language=query_plan.detected_language,
             query_variants=query_plan.variants,
             knowledge_languages=query_plan.knowledge_languages,
-            retrieval_routes=(*tuple(item.name for item in routes), *sidecar_route_names),
+            retrieval_routes=(
+                *tuple(item.name for item in routes),
+                *native_routes,
+                *sidecar_route_names,
+            ),
             query_type=query_plan.query_type,
             retrieval_top_k=route_top_k,
             rerank_top_n=rerank_top_n,
             context_top_n=context_top_n,
+            graph_version_hash=graph_plan.version_hash,
+            graph_mode=graph_plan.mode,
+            graph_generations={
+                str(kb.id): state.graph_generation for kb, state in graph_plan.targets
+            },
+            graph_query_count=graph_query_count,
+            graph_source_candidate_count=len(native_candidates),
+            graph_elapsed_ms=graph_plan.elapsed_ms + native_elapsed_ms,
+            graph_cacheable=graph_plan.cacheable
+            and not {"native_graph_unavailable", "native_graph_budget_exhausted"}.intersection(
+                native_warnings
+            ),
         )
 
     async def answer(
@@ -597,9 +672,7 @@ class OnlineService:
         record.request_status = QueryStatus.COMPLETED
         record.outcome = result.outcome
         record.answer_text = result.answer
-        record.effective_query_redacted = _redact_query(
-            result.effective_query or normalized
-        )
+        record.effective_query_redacted = _redact_query(result.effective_query or normalized)
         record.warnings = result.warnings
         record.timings = result.timings
         record.cache_status = {
@@ -660,9 +733,18 @@ class OnlineService:
             value.query,
             self._app_settings.max_query_chars,
         )
-        boundary = self._cache_boundary(security, knowledge_bases, value)
+        graph_plan = await self._native_graph_plan(
+            knowledge_bases, metadata_filter=value.metadata_filter
+        )
+        boundary = self._cache_boundary(
+            security,
+            knowledge_bases,
+            value,
+            graph_version_hash=graph_plan.version_hash,
+            graph_mode=graph_plan.mode,
+        )
         cache_warnings: tuple[str, ...] = ()
-        if self._cache is not None:
+        if self._cache is not None and graph_plan.cacheable:
             # 精确缓存成本最低，先查；未命中再做向量语义缓存。任何缓存故障都降级为
             # 正常检索，不应让“加速组件”变成问答可用性的单点故障。
             cache_started_at = time.perf_counter()
@@ -720,6 +802,7 @@ class OnlineService:
                 retrieval_profile=value.retrieval_profile,
                 page_size=50,
             ),
+            native_graph_plan=graph_plan,
         )
         timings["retrieval_ms"] = _elapsed_ms(retrieval_started_at)
         if not retrieval.candidates:
@@ -806,7 +889,7 @@ class OnlineService:
             rerank_top_n=retrieval.rerank_top_n,
             context_top_n=retrieval.context_top_n,
         )
-        if self._cache is not None:
+        if self._cache is not None and retrieval.graph_cacheable:
             cache_write_started_at = time.perf_counter()
             try:
                 await self._cache.put(
@@ -991,9 +1074,18 @@ class OnlineService:
             value.query,
             self._app_settings.max_query_chars,
         )
-        boundary = self._cache_boundary(security, knowledge_bases, value)
+        graph_plan = await self._native_graph_plan(
+            knowledge_bases, metadata_filter=value.metadata_filter
+        )
+        boundary = self._cache_boundary(
+            security,
+            knowledge_bases,
+            value,
+            graph_version_hash=graph_plan.version_hash,
+            graph_mode=graph_plan.mode,
+        )
         cache_warnings: list[str] = []
-        if self._cache is not None:
+        if self._cache is not None and graph_plan.cacheable:
             cache_started_at = time.perf_counter()
             try:
                 cached = await self._cache.get_exact(boundary, normalized_question)
@@ -1038,9 +1130,7 @@ class OnlineService:
                             "context_count": len(cached_answer.citations),
                             "original_query": cached_answer.original_query,
                             "effective_query": cached_answer.effective_query,
-                            "query_rewritten": (
-                                _query_was_rewritten(cached_answer)
-                            ),
+                            "query_rewritten": (_query_was_rewritten(cached_answer)),
                             "query_plan": _query_plan_trace(cached_answer),
                         },
                     )
@@ -1085,6 +1175,7 @@ class OnlineService:
                 retrieval_profile=value.retrieval_profile,
                 page_size=50,
             ),
+            native_graph_plan=graph_plan,
         )
         timings["retrieval_ms"] = _elapsed_ms(retrieval_started_at)
         context = self._context_candidates(
@@ -1099,9 +1190,7 @@ class OnlineService:
                 "context_count": len(context),
                 "original_query": retrieval.original_query,
                 "effective_query": retrieval.effective_query,
-                "query_rewritten": (
-                    _query_was_rewritten(retrieval)
-                ),
+                "query_rewritten": (_query_was_rewritten(retrieval)),
                 "query_plan": _query_plan_trace(retrieval),
             },
         )
@@ -1157,7 +1246,7 @@ class OnlineService:
         outcome = AnswerOutcome.SUCCESS if valid else AnswerOutcome.REFUSED
         if not valid:
             warnings.append("citation_validation_failed_after_stream")
-        elif self._cache is not None:
+        elif self._cache is not None and retrieval.graph_cacheable:
             cache_write_started_at = time.perf_counter()
             try:
                 await self._cache.put(
@@ -1367,9 +1456,208 @@ class OnlineService:
         for knowledge_base in knowledge_bases:
             grouped.setdefault(knowledge_base.security_scope_id, []).append(knowledge_base)
         return tuple(
-            (resource_scope_id, tuple(items))
-            for resource_scope_id, items in grouped.items()
+            (resource_scope_id, tuple(items)) for resource_scope_id, items in grouped.items()
         )
+
+    async def _native_graph_plan(
+        self,
+        knowledge_bases: tuple[KnowledgeBase, ...],
+        *,
+        metadata_filter: dict[str, Any] | None,
+        document_ids: tuple[UUID, ...] = (),
+    ) -> NativeGraphPlan:
+        """在缓存之前冻结全部库的图谱状态，并核验原生不支持的过滤边界。
+
+        READY 必须匹配当前内容修订。快照不调用模型，却能发现候选或退役物理
+        文档，防止缓存命中绕过来源检查。任何无法核验的状态都降级且禁止缓存；
+        DISABLED/STALE 等明确状态则使用各自独立的普通检索缓存。
+        """
+        if not self._graph_enabled or self._graphs is None or self._native_graph is None:
+            return NativeGraphPlan()
+        started_at = time.perf_counter()
+        versions: list[dict[str, Any]] = []
+        targets: list[tuple[KnowledgeBase, GraphState]] = []
+        warnings: list[str] = []
+        cacheable = True
+        deadline = time.monotonic() + _NATIVE_GRAPH_TIMEOUT_SECONDS
+        for knowledge_base in sorted(
+            knowledge_bases, key=lambda item: (item.security_scope_id, str(item.id))
+        ):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                warnings.append("native_graph_budget_exhausted")
+                cacheable = False
+                versions.append({"kb": str(knowledge_base.id), "state": "budget_exhausted"})
+                continue
+            try:
+                async with asyncio.timeout(remaining):
+                    state = await self._graphs.get(
+                        knowledge_base.security_scope_id, knowledge_base.id
+                    )
+                if state is not None and (
+                    state.security_scope_id != knowledge_base.security_scope_id
+                    or state.knowledge_base_id != knowledge_base.id
+                ):
+                    raise ValueError("graph state scope mismatch")
+            except Exception:
+                warnings.append("native_graph_unavailable")
+                cacheable = False
+                versions.append(
+                    {
+                        "scope": knowledge_base.security_scope_id,
+                        "kb": str(knowledge_base.id),
+                        "state": "unverified",
+                    }
+                )
+                continue
+            versions.append(
+                {
+                    "scope": knowledge_base.security_scope_id,
+                    "kb": str(knowledge_base.id),
+                    "content_revision": knowledge_base.revision,
+                    "configuration_version": state.configuration_version if state else None,
+                    "generation": state.graph_generation if state else None,
+                    "built_revision": state.built_for_revision if state else None,
+                    "target_revision": state.target_content_revision if state else None,
+                    "status": state.status.value if state else "MISSING",
+                    "enabled": state.configuration.enabled if state else False,
+                    "retrieval_enabled": state.configuration.retrieval_enabled if state else False,
+                    "profile": state.configuration.profile_ref if state else None,
+                }
+            )
+            if state is None or not state.configuration.enabled:
+                continue
+            if not state.configuration.retrieval_enabled:
+                warnings.append("native_graph_retrieval_disabled")
+                continue
+            if metadata_filter is not None or document_ids:
+                warnings.append(
+                    "native_graph_bypassed_metadata_filter"
+                    if metadata_filter is not None
+                    else "native_graph_bypassed_document_filter"
+                )
+                continue
+            if state.status != GraphStatus.READY:
+                warnings.append("native_graph_not_ready")
+                continue
+            if state.built_for_revision != knowledge_base.revision:
+                warnings.append("native_graph_stale")
+                continue
+            if len(targets) >= _NATIVE_GRAPH_MAX_KBS:
+                warnings.append("native_graph_budget_exhausted")
+                cacheable = False
+                continue
+            try:
+                remaining = max(0.0, deadline - time.monotonic())
+                async with asyncio.timeout(remaining):
+                    snapshot = await self._native_graph.snapshot(
+                        knowledge_base.security_scope_id, knowledge_base.id, state.graph_generation
+                    )
+                if (
+                    snapshot.security_scope_id != knowledge_base.security_scope_id
+                    or snapshot.knowledge_base_id != knowledge_base.id
+                    or snapshot.graph_generation != state.graph_generation
+                ):
+                    raise ValueError("graph snapshot scope mismatch")
+                if snapshot.entity_count == 0:
+                    warnings.append("native_graph_empty")
+                    continue
+                targets.append((knowledge_base, state))
+            except Exception:
+                warnings.append("native_graph_unavailable")
+                cacheable = False
+        digest = hashlib.sha256(
+            json.dumps(versions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        mode = "native" if targets else "off"
+        if metadata_filter is not None:
+            mode = "metadata_filter_bypass"
+        elif document_ids:
+            mode = "document_filter_bypass"
+        return NativeGraphPlan(
+            tuple(targets), digest, mode, tuple(dict.fromkeys(warnings)), cacheable,
+            _elapsed_ms(started_at),
+        )
+
+    async def _native_graph_candidates(
+        self,
+        security: SecurityContext,
+        plan: NativeGraphPlan,
+        question: str,
+        *,
+        page_size: int,
+        top_k: int,
+        threshold: float,
+        rrf_k: int,
+    ) -> tuple[tuple[RetrievalCandidate, ...], tuple[str, ...], tuple[str, ...], int]:
+        """每库一次原生导航再补原文召回；拒绝范围不符结果，异常只降级可选路线。
+
+        聚合、实体描述和社区报告不进入候选。来源指针也不绕过现有引擎的活动版本
+        映射；这里只使用有限关键词进行正常关键词检索。
+        """
+        if self._native_graph is None:
+            return (), (), (), 0
+        candidates: tuple[RetrievalCandidate, ...] = ()
+        warnings: list[str] = []
+        routes: list[str] = []
+        query_count = 0
+        deadline = time.monotonic() + _NATIVE_GRAPH_TIMEOUT_SECONDS
+        for knowledge_base, state in plan.targets:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                warnings.append("native_graph_budget_exhausted")
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    query_count += 1
+                    navigation = await self._native_graph.navigate(
+                        knowledge_base.security_scope_id,
+                        knowledge_base.id,
+                        state.graph_generation,
+                        question,
+                        limit=8,
+                    )
+                    if (
+                        navigation.security_scope_id != knowledge_base.security_scope_id
+                        or navigation.knowledge_base_id != knowledge_base.id
+                        or navigation.graph_generation != state.graph_generation
+                    ):
+                        raise ValueError("graph navigation scope mismatch")
+                    terms = tuple(
+                        dict.fromkeys(
+                            term.strip()
+                            for term in (*navigation.entities, *navigation.keywords)
+                            if isinstance(term, str)
+                            and term.strip()
+                            and len(term) <= 160
+                            and not any(unicodedata.category(char) in {"Cc", "Cf"} for char in term)
+                        )
+                    )[:8]
+                    if not terms:
+                        warnings.append("native_graph_empty")
+                        continue
+                    route = RetrievalRoute(
+                        name="ragflow:graph",
+                        question=" ".join(terms),
+                        vector_similarity_weight=0.0,
+                        rrf_weight=1.0,
+                    )
+                    original_candidates = await self._hybrid_rrf(
+                        security=security,
+                        knowledge_bases=(knowledge_base,),
+                        document_ids=(),
+                        routes=(route,),
+                        page_size=page_size,
+                        top_k=top_k,
+                        threshold=threshold,
+                        metadata_filter=None,
+                        rrf_k=rrf_k,
+                    )
+                candidates = _merge_candidate_routes(candidates, original_candidates)
+                routes.append(route.name)
+            except Exception:
+                warnings.append("native_graph_unavailable")
+        return candidates, tuple(dict.fromkeys(warnings)), tuple(dict.fromkeys(routes)), query_count
 
     @staticmethod
     def _cache_boundary(
@@ -1427,10 +1715,7 @@ class OnlineService:
             tuple(item.document_id for item in value.citations),
         )
         documents_by_id = {item.id: item for item in documents}
-        allowed_kbs = {
-            item.id: item.security_scope_id
-            for item in knowledge_bases
-        }
+        allowed_kbs = {item.id: item.security_scope_id for item in knowledge_bases}
         return all(
             bool(citation.resource_scope_id)
             and allowed_kbs.get(citation.knowledge_base_id) == citation.resource_scope_id
@@ -1504,9 +1789,7 @@ class OnlineService:
         # 此处只从供应商无关 Profile 读取业务超时和输出预算。
         model_profile = self._profiles.get("MODEL", "rewrite-openai-compatible@4")
         conversation = (
-            "\n".join(f"{item.role}: {item.content}" for item in history)
-            if history
-            else "(none)"
+            "\n".join(f"{item.role}: {item.content}" for item in history) if history else "(none)"
         )
         prompt = _template(
             _string(profile, "template"),
@@ -1542,8 +1825,10 @@ class OnlineService:
                             max_chars=self._app_settings.max_query_chars,
                         )
                         if any(
-                            language == _LANGUAGE_ZH and not query_zh
-                            or language == _LANGUAGE_EN and not query_en
+                            language == _LANGUAGE_ZH
+                            and not query_zh
+                            or language == _LANGUAGE_EN
+                            and not query_en
                             for language in language_profile.languages
                         ):
                             raise ValueError("query rewrite omitted a required language")
@@ -1700,6 +1985,7 @@ class OnlineService:
         RRF 分数公式为 ``路线权重 / (k + 名次)``；它只依赖相对名次，不要求向量分
         与 BM25 分处于同一数值尺度。候选还保留各路线观察到的最佳原始分数。
         """
+
         async def execute(
             route: RetrievalRoute,
             resource_scope_id: str,
@@ -1842,10 +2128,7 @@ class OnlineService:
             query_vectors = await self._embedding.embed((query,))
             query_vector = query_vectors[0]
             ranked = sorted(
-                (
-                    (_cosine_similarity(query_vector, node.embedding), node)
-                    for node in nodes
-                ),
+                ((_cosine_similarity(query_vector, node.embedding), node) for node in nodes),
                 key=lambda item: item[0],
                 reverse=True,
             )
@@ -1872,21 +2155,13 @@ class OnlineService:
             # 首位还能让同一源 Chunk 同时属于 Summary/Section 时优先保留 document
             # 路线，但绝不能从已过滤节点中重新捞回低相关摘要。
             best_document_summary = next(
-                (
-                    item
-                    for item in ranked
-                    if item[1].node_type == IndexNodeType.SUMMARY
-                ),
+                (item for item in ranked if item[1].node_type == IndexNodeType.SUMMARY),
                 None,
             )
             if best_document_summary is not None:
                 selected_ranked = [
                     best_document_summary,
-                    *(
-                        item
-                        for item in ranked
-                        if item[1] is not best_document_summary[1]
-                    ),
+                    *(item for item in ranked if item[1] is not best_document_summary[1]),
                 ][:top_nodes]
         selected_nodes = tuple(item[1] for item in selected_ranked)
         chunks = await self._source_candidates(
@@ -2009,9 +2284,7 @@ class OnlineService:
         )
         if document_ids:
             allowed_documents = set(document_ids)
-            evidence = tuple(
-                item for item in evidence if item.document_id in allowed_documents
-            )
+            evidence = tuple(item for item in evidence if item.document_id in allowed_documents)
         if not evidence:
             return ()
         nodes = tuple(
@@ -2676,9 +2949,7 @@ def _metadata_with_retrieval_routes(
     existing_routes = result.get("gateway_retrieval_routes")
     normalized_routes: list[str] = []
     if isinstance(existing_routes, (list, tuple)):
-        normalized_routes.extend(
-            item for item in existing_routes if isinstance(item, str) and item
-        )
+        normalized_routes.extend(item for item in existing_routes if isinstance(item, str) and item)
     elif isinstance(existing_routes, str) and existing_routes:
         normalized_routes.append(existing_routes)
     for route_name in route_names:
@@ -2765,11 +3036,10 @@ def _pages_are_adjacent(
     right_pages = [item.page for item in right.positions if item.page is not None]
     if not left_pages or not right_pages:
         return True
-    return min(
-        abs(left_page - right_page)
-        for left_page in left_pages
-        for right_page in right_pages
-    ) <= 1
+    return (
+        min(abs(left_page - right_page) for left_page in left_pages for right_page in right_pages)
+        <= 1
+    )
 
 
 def _merge_overlapping_text(left: str, right: str, *, minimum_overlap: int = 16) -> str | None:

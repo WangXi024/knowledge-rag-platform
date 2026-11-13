@@ -10,8 +10,10 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_service.domain.errors import RagError
 from rag_service.domain.graph import GraphConfiguration, GraphState, GraphStatus
 from rag_service.infrastructure.postgres.graph_models import GraphStateRow
 
@@ -95,8 +97,14 @@ class SqlAlchemyGraphRepository:
         """校验对象 Scope 后创建并 flush，及时暴露复合外键/唯一键错误，但不提交事务。"""
         if value.security_scope_id != security_scope_id:
             raise ValueError("graph state security scope does not match")
-        self._session.add(GraphStateRow(**_state_values(value)))
-        await self._session.flush()
+        # 两个首次启用请求可能同时读到缺省状态；唯一冲突应是可重试409而非数据库500。
+        result = await self._session.execute(
+            insert(GraphStateRow).values(**_state_values(value)).on_conflict_do_nothing(
+                index_elements=["security_scope_id", "knowledge_base_id"]
+            ).returning(GraphStateRow.knowledge_base_id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise RagError("RAG-GRAPH-005", "图谱配置已被并发创建，请重新读取", 409, True)
 
     async def update(
         self, security_scope_id: str, value: GraphState, *, expected_row_version: int,

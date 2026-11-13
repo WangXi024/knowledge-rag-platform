@@ -21,9 +21,11 @@ from rag_service.application.access import (
     SharedKnowledgeBaseAccessPolicy,
     TrustedNetworkManagementAccessPolicy,
 )
+from rag_service.application.graph import GraphService
 from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.errors import ErrorDetail, RagError, ResourceNotFoundError
+from rag_service.domain.graph import native_graph_parser_config
 from rag_service.domain.models import (
     DocumentRecord,
     DocumentStatus,
@@ -151,6 +153,7 @@ class OfflineService:
         versions: DocumentVersionRepository | None = None,
         access_policy: KnowledgeBaseAccessPolicy | None = None,
         management_access: ManagementAccessPolicy | None = None,
+        graph_service: GraphService | None = None,
     ) -> None:
         """注入持久化、暂存、RAG 引擎、Profile、任务配置和可选版本仓库。
 
@@ -170,6 +173,7 @@ class OfflineService:
         self._versions = versions
         self._access_policy = access_policy or SharedKnowledgeBaseAccessPolicy()
         self._management_access = management_access or TrustedNetworkManagementAccessPolicy()
+        self._graph_service = graph_service
 
     async def execute_idempotent(
         self,
@@ -387,6 +391,11 @@ class OfflineService:
             embedding_model=self._embedding_model,
         )
         self._profiles.get("RETRIEVAL", retrieval_ref)
+        if self._graph_service is not None:
+            graph = await self._graph_service.get(security, knowledge_base_id)
+            configuration.parser_config["graphrag"] = native_graph_parser_config(
+                graph.configuration
+            )
         profile_changed = any(
             (
                 parser_ref != knowledge_base.parser_profile_ref,
@@ -425,6 +434,10 @@ class OfflineService:
                 "RAGFlow 修改成功但本地映射未完成",
                 http_status=409,
                 retryable=True,
+            )
+        if profile_changed and self._graph_service is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, knowledge_base_id
             )
         return knowledge_base
 
@@ -603,6 +616,10 @@ class OfflineService:
             if self._versions is not None:
                 await self._versions.add(security.security_scope_id, initial_version)
             await self._jobs.add(security.security_scope_id, job)
+            if self._graph_service is not None:
+                await self._graph_service.content_changed(
+                    security.security_scope_id, knowledge_base_id, auto_build=False
+                )
         except Exception:
             await self._staging.delete(staged.staged_file_id)
             raise
@@ -756,6 +773,10 @@ class OfflineService:
             )
             await versions.add(security.security_scope_id, version)
             await self._jobs.add(security.security_scope_id, job)
+            if self._graph_service is not None:
+                await self._graph_service.content_changed(
+                    security.security_scope_id, document.knowledge_base_id, auto_build=False
+                )
         except Exception:
             await self._staging.delete(staged.staged_file_id)
             raise
@@ -838,6 +859,10 @@ class OfflineService:
             },
         )
         await self._jobs.add(security.security_scope_id, job)
+        if self._graph_service is not None and job.knowledge_base_id is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, job.knowledge_base_id, auto_build=False
+            )
         return job
 
     async def get_document(
@@ -1002,6 +1027,10 @@ class OfflineService:
             payload={"schema_version": 1, "delete_existing": reparse},
         )
         await self._jobs.add(security.security_scope_id, job)
+        if self._graph_service is not None and job.knowledge_base_id is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, job.knowledge_base_id, auto_build=False
+            )
         return job
 
     async def retry_document(
@@ -1113,6 +1142,10 @@ class OfflineService:
             payload=dict(previous.payload),
         )
         await self._jobs.add(security.security_scope_id, job)
+        if self._graph_service is not None and job.knowledge_base_id is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, job.knowledge_base_id, auto_build=False
+            )
         return job
 
     async def delete_document(
@@ -1196,6 +1229,10 @@ class OfflineService:
             payload={"schema_version": 1},
         )
         await self._jobs.add(security.security_scope_id, job)
+        if self._graph_service is not None and job.knowledge_base_id is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, job.knowledge_base_id, auto_build=False
+            )
         return job
 
     async def delete_knowledge_base(
@@ -1223,6 +1260,10 @@ class OfflineService:
                 http_status=409,
                 retryable=False,
             )
+        if self._graph_service is not None:
+            await self._graph_service.stop_for_deletion(
+                security.security_scope_id, knowledge_base_id
+            )
         knowledge_base.status = require_transition(
             knowledge_base.status,
             KnowledgeBaseStatus.DELETING,
@@ -1247,6 +1288,10 @@ class OfflineService:
             payload={"schema_version": 1, "force": force},
         )
         await self._jobs.add(security.security_scope_id, job)
+        if self._graph_service is not None and job.knowledge_base_id is not None:
+            await self._graph_service.content_changed(
+                security.security_scope_id, job.knowledge_base_id, auto_build=False
+            )
         return job
 
     async def cancel_job(
@@ -1269,6 +1314,13 @@ class OfflineService:
                 http_status=409,
                 retryable=False,
             )
+        if job.job_type == JobType.GRAPH_BUILD and self._graph_service is not None:
+            if job.knowledge_base_id is not None:
+                await self._graph_service.cancel(
+                    security, job.knowledge_base_id, expected_job_id=job.id
+                )
+            # 绑定请求中的具体Job，旧任务取消绝不能转而取消同库的新一代构图。
+            return await self.get_job(security, job_id)
         target = (
             JobStatus.CANCELLED
             if job.status in {JobStatus.PENDING, JobStatus.RETRY_WAIT}

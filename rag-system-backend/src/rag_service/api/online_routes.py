@@ -24,6 +24,7 @@ from rag_service.api.schemas import (
     CreateFeedbackRequest,
     FeedbackData,
     FeedbackResponse,
+    GraphRetrievalDiagnostics,
     QueryPlanData,
     RequestRecordData,
     RequestRecordResponse,
@@ -111,6 +112,14 @@ def _retrieval(
         ],
         total=value.total,
         warnings=list(value.warnings),
+        graph_diagnostics=GraphRetrievalDiagnostics(
+            mode=value.graph_mode,
+            version_hash=value.graph_version_hash,
+            generations=value.graph_generations,
+            query_count=value.graph_query_count,
+            source_candidate_count=value.graph_source_candidate_count,
+            elapsed_ms=value.graph_elapsed_ms,
+        ),
     )
 
 

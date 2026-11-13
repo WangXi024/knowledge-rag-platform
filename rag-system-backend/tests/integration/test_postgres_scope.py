@@ -22,7 +22,13 @@ from rag_service.bootstrap.profiles import (
     import_profiles,
     load_profile_seeds,
 )
-from rag_service.domain.graph import GraphConfiguration, GraphState, GraphStatus
+from rag_service.domain.graph import (
+    GraphConfiguration,
+    GraphSnapshot,
+    GraphState,
+    GraphStatus,
+    GraphTask,
+)
 from rag_service.domain.models import (
     AnswerOutcome,
     Citation,
@@ -981,3 +987,122 @@ async def test_graph_state_cas_between_independent_transactions_has_one_winner(
                 KnowledgeBaseRow.id == knowledge_base.id,
             ))
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_queued_graph_cancellation_is_claimed_and_confirmed_without_engine_submission(
+    database_session: AsyncSession,
+) -> None:
+    """真实PG中排队取消仍可认领；外部构建从未开始时安全结束，不遗留QUEUED。"""
+    from rag_service.application.graph import GraphService
+    from rag_service.application.graph_worker import GraphWorker
+
+    scope = "8" * 64
+    kb = KnowledgeBase(
+        security_scope_id=scope, name="graph-queued-cancel-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1", status=KnowledgeBaseStatus.READY,
+    )
+    kbs = SqlAlchemyKnowledgeBaseRepository(database_session)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    jobs = SqlAlchemyJobRepository(database_session)
+    await kbs.add(scope, kb)
+    await graphs.add(
+        scope, GraphState(scope, kb.id, configuration=GraphConfiguration(enabled=True))
+    )
+    service = GraphService(kbs, graphs, jobs, enabled=True, model_ref="synthetic")
+    state = await service.enqueue(scope, kb.id)
+    job = await jobs.get(scope, state.job_id)
+    job.status = JobStatus.CANCEL_REQUESTED
+    assert await jobs.update(scope, job)
+    state.status = GraphStatus.CANCELLING
+    assert await graphs.update(scope, state, expected_row_version=state.row_version)
+    claimed = await jobs.claim_next(
+        worker_id="graph-cancel-fixture", now=datetime.now(UTC),
+        locked_until=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert claimed.id == job.id and claimed.status == JobStatus.CANCEL_REQUESTED
+    owned = SqlAlchemyJobRepository(
+        database_session, worker_id="graph-cancel-fixture", owned_job=(scope, job.id),
+    )
+
+    async def checkpoint() -> None:
+        """使用与真实Runner相同的guard→commit→reset顺序。"""
+        await owned.guard_ownership()
+        await database_session.commit()
+        owned.reset_ownership_guard()
+
+    await GraphWorker(kbs, graphs, owned, object(), service, checkpoint=checkpoint).execute(claimed)
+    assert (await jobs.get(scope, job.id)).status == JobStatus.CANCELLED
+    assert (await graphs.get(scope, kb.id)).status == GraphStatus.STALE
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_followup_job_commits_under_old_lease_in_one_transaction(
+    database_session: AsyncSession,
+) -> None:
+    """真实PG唯一索引与租约一起验证：旧终态与新排队Job必须一次提交。"""
+    from rag_service.application.graph import GraphService
+    from rag_service.application.graph_worker import GraphWorker
+
+    scope = "7" * 64
+    kb = KnowledgeBase(
+        security_scope_id=scope, name="graph-successor-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1", status=KnowledgeBaseStatus.READY,
+    )
+    kbs = SqlAlchemyKnowledgeBaseRepository(database_session)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    jobs = SqlAlchemyJobRepository(database_session)
+    await kbs.add(scope, kb)
+    await graphs.add(
+        scope, GraphState(scope, kb.id, configuration=GraphConfiguration(enabled=True))
+    )
+    service = GraphService(kbs, graphs, jobs, enabled=True, model_ref="synthetic")
+    state = await service.enqueue(scope, kb.id)
+    job = await jobs.claim_next(
+        worker_id="graph-successor-fixture", now=datetime.now(UTC),
+        locked_until=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert job.id == state.job_id
+    owned = SqlAlchemyJobRepository(
+        database_session, worker_id="graph-successor-fixture", owned_job=(scope, job.id),
+    )
+    worker_service = GraphService(kbs, graphs, owned, enabled=True, model_ref="synthetic")
+
+    async def checkpoint() -> None:
+        """末次提交之后不能再用终态任务的旧租约进行下一次提交。"""
+        await owned.guard_ownership()
+        await database_session.commit()
+        owned.reset_ownership_guard()
+
+    class CompletedEngine:
+        """只替代上游网络；数据库、任务约束和租约均使用真实PostgreSQL。"""
+
+        async def configure(self, *_args: object) -> None:
+            """测试配置没有外部副作用。"""
+            return None
+
+        async def build(self, resource_scope: str, kb_id: object, generation: int) -> GraphTask:
+            """返回合成完成任务，不代表真实RAGFlow联调通过。"""
+            return GraphTask(scope, kb.id, generation, "synthetic-completed", GraphStatus.READY)
+
+        async def snapshot(
+            self, resource_scope: str, kb_id: object, generation: int
+        ) -> GraphSnapshot:
+            """模拟构图期间内容发布，触发后继任务的真实事务路径。"""
+            await kbs.increment_revision(scope, kb.id)
+            return GraphSnapshot(scope, kb.id, generation)
+
+    await GraphWorker(
+        kbs, graphs, owned, CompletedEngine(), worker_service, checkpoint=checkpoint,
+    ).execute(job)
+    current = await graphs.get(scope, kb.id)
+    assert current.status == GraphStatus.QUEUED and current.job_id != job.id
+    assert current.target_content_revision == kb.revision + 1
+    assert (await jobs.get(scope, job.id)).status == JobStatus.SUCCEEDED
+    assert (await jobs.get(scope, current.job_id)).status == JobStatus.PENDING

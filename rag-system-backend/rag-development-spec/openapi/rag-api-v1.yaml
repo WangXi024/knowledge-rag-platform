@@ -26,6 +26,7 @@ tags:
   - name: Answers
   - name: Citations
   - name: Feedback
+  - name: Graph
 
 paths:
   /health/live:
@@ -889,6 +890,181 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /v1/management/knowledge-bases/{knowledge_base_id}/graph:
+    get:
+      tags:
+      - Graph
+      summary: Get Graph
+      description: 查询当前配置和图谱状态，不触发构图或模型费用。
+      operationId: get_graph_v1_management_knowledge_bases__knowledge_base_id__graph_get
+      parameters:
+      - name: knowledge_base_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Knowledge Base Id
+      - name: X-Tenant-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-Tenant-Id
+      - name: X-User-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-User-Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/management/knowledge-bases/{knowledge_base_id}/graph/configuration:
+    put:
+      tags:
+      - Graph
+      summary: Configure Graph
+      description: 配置知识库图谱；自动构建开启时仅登记任务，不等待模型执行。
+      operationId: configure_graph_v1_management_knowledge_bases__knowledge_base_id__graph_configuration_put
+      parameters:
+      - name: knowledge_base_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Knowledge Base Id
+      - name: X-Tenant-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-Tenant-Id
+      - name: X-User-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-User-Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GraphConfigurationData'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/management/knowledge-bases/{knowledge_base_id}/graph/build:
+    post:
+      tags:
+      - Graph
+      summary: Build Graph
+      description: 请求构建、重建或失败重试，相同知识库的在途请求合并。
+      operationId: build_graph_v1_management_knowledge_bases__knowledge_base_id__graph_build_post
+      parameters:
+      - name: knowledge_base_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Knowledge Base Id
+      - name: X-Tenant-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-Tenant-Id
+      - name: X-User-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-User-Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/management/knowledge-bases/{knowledge_base_id}/graph/cancel:
+    post:
+      tags:
+      - Graph
+      summary: Cancel Graph
+      description: 登记取消意图；CANCELLING 明确表示尚未确认引擎执行结束。
+      operationId: cancel_graph_v1_management_knowledge_bases__knowledge_base_id__graph_cancel_post
+      parameters:
+      - name: knowledge_base_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Knowledge Base Id
+      - name: X-Tenant-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-Tenant-Id
+      - name: X-User-ID
+        in: header
+        required: true
+        schema:
+          type: string
+          title: X-User-Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 components:
   securitySchemes:
@@ -1821,7 +1997,12 @@ components:
     RetrievalData:
       type: object
       additionalProperties: false
-      required: [original_query, effective_query, query_plan, candidates, total]
+      required:
+      - original_query
+      - effective_query
+      - query_plan
+      - candidates
+      - total
       properties:
         original_query:
           type: string
@@ -1840,6 +2021,11 @@ components:
           type: array
           items:
             type: string
+        graph_diagnostics:
+          anyOf:
+          - $ref: '#/components/schemas/GraphRetrievalDiagnostics'
+          - type: 'null'
+          default: null
     RetrievalResponse:
       type: object
       required: [request_id, data]
@@ -2110,3 +2296,163 @@ components:
           format: uuid
         data:
           $ref: '#/components/schemas/Feedback'
+
+    GraphConfigurationData:
+      properties:
+        enabled:
+          type: boolean
+          title: Enabled
+          default: false
+        profile_ref:
+          type: string
+          const: native-graph-light@1
+          title: Profile Ref
+          default: native-graph-light@1
+        auto_build:
+          type: boolean
+          title: Auto Build
+          default: true
+        retrieval_enabled:
+          type: boolean
+          title: Retrieval Enabled
+          default: true
+      additionalProperties: false
+      type: object
+      title: GraphConfigurationData
+      description: 知识库级受控图谱配置，默认关闭；查询开关与构图开关独立。
+    GraphStateData:
+      properties:
+        knowledge_base_id:
+          type: string
+          format: uuid
+          title: Knowledge Base Id
+        configuration:
+          $ref: '#/components/schemas/GraphConfigurationData'
+        status:
+          $ref: '#/components/schemas/GraphStatus'
+        target_content_revision:
+          type: integer
+          minimum: 0.0
+          title: Target Content Revision
+        built_for_revision:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Built For Revision
+        graph_generation:
+          type: integer
+          minimum: 0.0
+          title: Graph Generation
+        configuration_version:
+          type: integer
+          minimum: 0.0
+          title: Configuration Version
+        job_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Job Id
+        last_error:
+          anyOf:
+          - $ref: '#/components/schemas/ApiError'
+          - type: 'null'
+        queued_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Queued At
+        started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Started At
+        completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Completed At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      additionalProperties: false
+      type: object
+      required:
+      - knowledge_base_id
+      - configuration
+      - status
+      - target_content_revision
+      - graph_generation
+      - configuration_version
+      - updated_at
+      title: GraphStateData
+      description: 图谱状态和内容/图谱版本；任务接收与图谱就绪通过独立状态表达。
+    GraphStateResponse:
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          title: Request Id
+        data:
+          $ref: '#/components/schemas/GraphStateData'
+      additionalProperties: false
+      type: object
+      required:
+      - request_id
+      - data
+      title: GraphStateResponse
+      description: 图谱管理操作的统一响应。
+    GraphStatus:
+      type: string
+      enum:
+      - DISABLED
+      - NOT_BUILT
+      - QUEUED
+      - BUILDING
+      - READY
+      - STALE
+      - FAILED
+      - CANCELLING
+      title: GraphStatus
+      description: 图谱配置、构建、失效和取消的对外生命周期；失败不能伪装为可用。
+
+    GraphRetrievalDiagnostics:
+      properties:
+        mode:
+          type: string
+          title: Mode
+        version_hash:
+          type: string
+          title: Version Hash
+        generations:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Generations
+        query_count:
+          type: integer
+          minimum: 0.0
+          title: Query Count
+          default: 0
+        source_candidate_count:
+          type: integer
+          minimum: 0.0
+          title: Source Candidate Count
+          default: 0
+        elapsed_ms:
+          type: number
+          minimum: 0.0
+          title: Elapsed Ms
+          default: 0
+      additionalProperties: false
+      type: object
+      required:
+      - mode
+      - version_hash
+      title: GraphRetrievalDiagnostics
+      description: 仅包含图谱模式、版本和计数，不公开安全摘要、引擎ID、模型密钥或聚合正文。

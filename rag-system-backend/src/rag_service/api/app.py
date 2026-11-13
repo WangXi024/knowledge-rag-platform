@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+from rag_service.api.graph_routes import install_graph_routes
 from rag_service.api.offline_routes import install_offline_routes
 from rag_service.api.online_routes import install_online_routes
 from rag_service.api.schemas import (
@@ -34,6 +35,7 @@ from rag_service.api.schemas import (
     VersionData,
     VersionResponse,
 )
+from rag_service.application.graph import GraphService
 from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.offline import OfflineService
 from rag_service.application.online import OnlineService
@@ -50,6 +52,7 @@ from rag_service.infrastructure.models.openai_compatible_rerank import (
     OpenAICompatibleRerankAdapter,
 )
 from rag_service.infrastructure.models.rerank import DisabledRerankAdapter
+from rag_service.infrastructure.postgres.graph_repository import SqlAlchemyGraphRepository
 from rag_service.infrastructure.postgres.query_store import (
     TransactionalQueryRepository,
 )
@@ -67,6 +70,7 @@ from rag_service.infrastructure.postgres.session import (
 )
 from rag_service.infrastructure.postgres.session import create_session_factory
 from rag_service.infrastructure.ragflow.adapter import RagFlowAdapter
+from rag_service.infrastructure.ragflow.graph_adapter import RagFlowGraphAdapter
 from rag_service.infrastructure.staging.filesystem import FileSystemUploadStaging
 from rag_service.observability.logging import configure_structured_logging
 from rag_service.security.context import SecurityContext
@@ -155,6 +159,7 @@ def create_app(
     readiness_probe: ReadinessProbe | None = None,
     offline_service: OfflineService | None = None,
     online_service: OnlineService | None = None,
+    graph_service: GraphService | None = None,
     runtime_readiness: bool = False,
 ) -> FastAPI:
     """创建配置完整的 FastAPI 应用，并按需组装真实或注入的依赖。
@@ -373,12 +378,35 @@ def create_app(
                 settings.ragflow.embedding_model,
                 idempotency,
                 versions,
+                graph_service=GraphService(
+                    knowledge_bases, SqlAlchemyGraphRepository(session), jobs,
+                    enabled=settings.ragflow.graph_enabled,
+                    model_ref=settings.ragflow.graph_chat_model, profiles=catalog,
+                ),
             )
             try:
                 yield service
             finally:
                 await rag_engine.close()
         # 退出 session.begin 后事务已成功提交；回滚不会执行这里的通知。
+        await notify_committed(session, settings)
+
+    async def get_graph_service() -> AsyncIterator[GraphService]:
+        """在同一短事务中保存图谱配置、唯一构建状态和持久化 Job，提交后才唤醒。"""
+        if graph_service is not None:
+            yield graph_service
+            return
+        if session_factory is None:
+            raise RagError("RAG-GRAPH-002", "图谱管理服务尚未配置", 503, False)
+        async with session_factory() as session, session.begin():
+            catalog = await ProfileCatalog.from_database(session, settings.profiles)
+            yield GraphService(
+                SqlAlchemyKnowledgeBaseRepository(session),
+                SqlAlchemyGraphRepository(session),
+                SqlAlchemyJobRepository(session),
+                enabled=settings.ragflow.graph_enabled,
+                model_ref=settings.ragflow.graph_chat_model, profiles=catalog,
+            )
         await notify_committed(session, settings)
 
     async def get_online_service() -> AsyncIterator[OnlineService]:
@@ -403,6 +431,7 @@ def create_app(
                 knowledge_bases,
                 documents,
             )
+            native_graph = RagFlowGraphAdapter(settings.ragflow, knowledge_bases, documents)
             llm = OpenAICompatibleLlmAdapter(settings.models.llm)
             embedding = OpenAICompatibleEmbeddingAdapter(settings.models.embedding)
             # Rerank 只在四项配置完整且启动预检已经通过时创建真实云端适配器；关闭
@@ -438,6 +467,9 @@ def create_app(
                 embedding=embedding,
                 index_nodes=index_nodes,
                 entity_graph=entity_graph,
+                graphs=SqlAlchemyGraphRepository(session),
+                native_graph=native_graph,
+                graph_enabled=settings.ragflow.graph_enabled,
             )
             try:
                 yield service
@@ -448,6 +480,7 @@ def create_app(
                 await embedding.close()
                 await llm.close()
                 await rag_engine.close()
+                await native_graph.close()
 
     @app.get("/health/live", response_model=HealthResponse, tags=["System"])
     async def liveness(request: Request) -> HealthResponse:
@@ -522,6 +555,7 @@ def create_app(
                     "summary_index": True,
                     "entity_index": True,
                     "lightweight_knowledge_graph": True,
+                    "native_graphrag": settings.ragflow.graph_enabled,
                     "tenant_shared_knowledge_bases": True,
                     "system_shared_knowledge_bases": True,
                     "automatic_shared_knowledge_retrieval": True,
@@ -546,6 +580,7 @@ def create_app(
         get_online_service=get_online_service,
         sse_heartbeat_seconds=settings.answers.sse_heartbeat_seconds,
     )
+    install_graph_routes(app, authenticate=authenticate, get_graph_service=get_graph_service)
 
     return app
 

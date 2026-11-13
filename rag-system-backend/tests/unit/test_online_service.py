@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,6 +19,15 @@ from rag_service.application.online import (
 )
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.errors import LlmError, ResourceNotFoundError
+from rag_service.domain.graph import (
+    GraphConfiguration,
+    GraphNavigation,
+    GraphPort,
+    GraphRepository,
+    GraphSnapshot,
+    GraphState,
+    GraphStatus,
+)
 from rag_service.domain.models import (
     AnswerOutcome,
     Citation,
@@ -455,6 +465,101 @@ class MemoryQueries:
         self.feedback.append(value)
 
 
+class MemoryNativeGraphStates:
+    """按安全范围保存图谱状态，单测可改变代数或配置模拟构图和缓存失效。"""
+
+    def __init__(self, states: tuple[GraphState, ...]) -> None:
+        """保存显式范围状态及查询轨迹，不访问数据库。"""
+        self.states = states
+        self.calls: list[tuple[str, UUID]] = []
+
+    async def get(self, security_scope_id: str, knowledge_base_id: UUID) -> GraphState | None:
+        """只返回当前资源范围对应图谱，跨范围状态不会进入路由或缓存摘要。"""
+        self.calls.append((security_scope_id, knowledge_base_id))
+        return next(
+            (
+                state
+                for state in self.states
+                if state.security_scope_id == security_scope_id
+                and state.knowledge_base_id == knowledge_base_id
+            ),
+            None,
+        )
+
+
+class FakeNativeGraph:
+    """只返回导航词的原生图谱假端口，用于证明生成摘要从不成为证据。"""
+
+    def __init__(self) -> None:
+        """初始化无故障、有实体图谱，可独立模拟快照或导航故障。"""
+        self.snapshot_calls: list[tuple[str, UUID, int]] = []
+        self.navigation_calls: list[tuple[str, UUID, int, str]] = []
+        self.fail_snapshot = False
+        self.fail_navigation = False
+        self.cross_scope = False
+        self.empty = False
+
+    async def snapshot(
+        self, security_scope_id: str, knowledge_base_id: UUID, graph_generation: int
+    ) -> GraphSnapshot:
+        """模拟不收费的结构/来源边界检查；失败表示无法可靠证明当前来源。"""
+        self.snapshot_calls.append((security_scope_id, knowledge_base_id, graph_generation))
+        if self.fail_snapshot:
+            raise TimeoutError("synthetic graph snapshot timeout")
+        return GraphSnapshot(
+            security_scope_id,
+            knowledge_base_id,
+            graph_generation,
+            entity_count=0 if self.empty else 2,
+        )
+
+    async def navigate(
+        self,
+        security_scope_id: str,
+        knowledge_base_id: UUID,
+        graph_generation: int,
+        question: str,
+        *,
+        limit: int = 8,
+    ) -> GraphNavigation:
+        """返回有限独特导航词或合成超时，不提供可被误用的摘要正文。"""
+        self.navigation_calls.append(
+            (security_scope_id, knowledge_base_id, graph_generation, question)
+        )
+        if self.fail_navigation:
+            raise TimeoutError("synthetic graph model timeout")
+        return GraphNavigation(
+            "foreign-scope" if self.cross_scope else security_scope_id,
+            knowledge_base_id,
+            graph_generation,
+            entities=("native_unique_entity",),
+            keywords=("native_unique_entity",),
+        )
+
+
+def _enable_native_graph(
+    service: OnlineService,
+    knowledge_base: KnowledgeBase,
+) -> tuple[GraphState, MemoryNativeGraphStates, FakeNativeGraph]:
+    """把 READY 且匹配内容版本的图谱注入既有离线服务测试夹具。"""
+    state = GraphState(
+        knowledge_base.security_scope_id,
+        knowledge_base.id,
+        configuration=GraphConfiguration(enabled=True),
+        status=GraphStatus.READY,
+        built_for_revision=knowledge_base.revision,
+        target_content_revision=knowledge_base.revision,
+        graph_generation=2,
+        configuration_version=1,
+    )
+    states = MemoryNativeGraphStates((state,))
+    graph = FakeNativeGraph()
+    service._graphs = cast(GraphRepository, states)
+    service._native_graph = cast(GraphPort, graph)
+    service._graph_enabled = True
+    return state, states, graph
+
+
 def _security(tenant: str = "tenant") -> SecurityContext:
     return SecurityContext.create(
         subject_id="subject",
@@ -765,9 +870,7 @@ async def test_retrieval_semantically_deduplicates_near_identical_candidates(
     )
 
     assert [item.chunk_id for item in result.candidates] == [first.chunk_id]
-    assert embedding.requests == [
-        ("这是最小非业务合成证据。", "这是最小非业务合成证据!")
-    ]
+    assert embedding.requests == [("这是最小非业务合成证据。", "这是最小非业务合成证据!")]
     assert "semantic_candidate_dedup_bypassed" not in result.warnings
 
 
@@ -1317,9 +1420,7 @@ async def test_metadata_filter_bypasses_sidecar_routes_to_preserve_scope(
             query="Summarize the main points of this document.",
             metadata_filter={
                 "logic": "and",
-                "conditions": [
-                    {"field": "language", "operator": "eq", "value": "en"}
-                ],
+                "conditions": [{"field": "language", "operator": "eq", "value": "en"}],
             },
         ),
     )
@@ -1421,9 +1522,7 @@ async def test_chinese_query_over_english_kb_uses_bilingual_vector_and_english_b
 
     assert result.original_query == "每支球队可以同时有多少名球员在场上?"
     assert result.effective_query == translated
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1463,9 +1562,7 @@ async def test_english_query_over_chinese_kb_adds_chinese_vector_and_bm25(
     assert result.effective_query == translated
     assert result.query_variants == {"zh-CN": translated, "en-US": result.original_query}
     assert result.knowledge_languages == ("zh-CN",)
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1524,9 +1621,7 @@ async def test_mixed_language_kb_uses_both_bm25_routes_and_weighted_rrf(
     )
 
     assert result.knowledge_languages == ("zh-CN", "en-US")
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (result.original_query, 0.0),
         (translated, 1.0),
@@ -1562,9 +1657,7 @@ async def test_english_query_over_mixed_kb_uses_chinese_and_english_routes(
 
     assert result.effective_query == result.original_query
     assert result.query_variants == {"zh-CN": translated, "en-US": result.original_query}
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1718,9 +1811,7 @@ async def test_answer_exposes_rewritten_query_and_preserves_it_in_cache(
     assert second.original_query == first.original_query
     assert second.effective_query == first.effective_query
     assert second.cache_type == "exact"
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (first.original_query, 1.0),
         (first.effective_query, 1.0),
         (first.effective_query, 0.0),
@@ -1945,9 +2036,7 @@ async def test_sse_translates_chinese_for_retrieval_but_answers_original_questio
     assert retrieval_event.data["original_query"] == "球员累计五次犯规后会怎样?"
     assert retrieval_event.data["effective_query"] == translated
     assert retrieval_event.data["query_rewritten"] is True
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (retrieval_event.data["original_query"], 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -2316,3 +2405,230 @@ async def test_stream_query_record_and_cancel_are_scope_qualified(
     assert cancelled.request_status == QueryStatus.CANCELLED
     with pytest.raises(ResourceNotFoundError):
         await service.cancel_request(_security("other"), cancel_id)
+
+
+async def test_native_graph_navigates_once_then_retrieves_original_sources(
+    service_settings: ServiceSettings,
+) -> None:
+    """多条双语基础路线只进行一次原生导航，补召回仍只使用普通原文候选。"""
+    service, engine, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成问题"],
+        document_languages=("zh", "en"),
+    )
+    _, states, graph = _enable_native_graph(service, knowledge_base)
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert len(graph.navigation_calls) == 1
+    assert graph.navigation_calls[0][:3] == (
+        knowledge_base.security_scope_id,
+        knowledge_base.id,
+        2,
+    )
+    assert states.calls == [(knowledge_base.security_scope_id, knowledge_base.id)]
+    graph_queries = [query for query in engine.queries if query.question == "native_unique_entity"]
+    assert len(graph_queries) == 1
+    assert graph_queries[0].knowledge_base_ids == (knowledge_base.id,)
+    assert graph_queries[0].vector_similarity_weight == 0.0
+    assert graph_queries[0].security.security_scope_id == knowledge_base.security_scope_id
+    assert "ragflow:graph" in result.retrieval_routes
+    assert result.candidates[0].content == "这是最小非业务合成证据。"
+    assert result.graph_mode == "native" and result.graph_cacheable
+    assert result.graph_query_count == 1
+    assert result.graph_source_candidate_count == 1
+    assert result.graph_generations == {str(knowledge_base.id): 2}
+    assert result.graph_elapsed_ms >= 0
+
+
+@pytest.mark.parametrize("restriction", ["metadata", "documents"])
+async def test_native_graph_bypasses_filters_that_upstream_does_not_honor(
+    service_settings: ServiceSettings,
+    restriction: str,
+) -> None:
+    """元数据或文档限定时完全跳过图谱，不让原生全库聚合绕开用户过滤。"""
+    service, engine, _, knowledge_base, document = _service(service_settings, llm_responses=[])
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    metadata = {"logic": "and", "conditions": []} if restriction == "metadata" else None
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput(
+            (knowledge_base.id,),
+            "synthetic question",
+            metadata_filter=metadata,
+            document_ids=(document.id,) if restriction == "documents" else (),
+        ),
+    )
+    assert graph.snapshot_calls == graph.navigation_calls == []
+    assert not any(query.question == "native_unique_entity" for query in engine.queries)
+    expected = "metadata_filter" if restriction == "metadata" else "document_filter"
+    assert f"native_graph_bypassed_{expected}" in result.warnings
+    assert result.graph_mode != "native"
+
+
+@pytest.mark.parametrize("condition", ["disabled", "retrieval_disabled", "building", "stale"])
+async def test_native_graph_eligibility_requires_ready_current_enabled_configuration(
+    service_settings: ServiceSettings,
+    condition: str,
+) -> None:
+    """仅当前内容版本的 READY、开启构图及检索的图谱可导航，其余正常走普通检索。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    state, _, graph = _enable_native_graph(service, knowledge_base)
+    if condition == "disabled":
+        state.configuration = replace(state.configuration, enabled=False)
+    elif condition == "retrieval_disabled":
+        state.configuration = replace(state.configuration, retrieval_enabled=False)
+    elif condition == "building":
+        state.status = GraphStatus.BUILDING
+    else:
+        state.built_for_revision = knowledge_base.revision - 1
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert graph.snapshot_calls == graph.navigation_calls == []
+    assert result.graph_mode == "off" and result.candidates
+
+
+@pytest.mark.parametrize("stage", ["snapshot", "navigation", "cross_scope"])
+async def test_native_graph_failures_degrade_and_never_write_normal_cache(
+    service_settings: ServiceSettings,
+    stage: str,
+) -> None:
+    """图谱超时、来源未知或返回错误范围都降级普通答案，并禁止缓存正常图谱结果。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.fail_snapshot = stage == "snapshot"
+    graph.fail_navigation = stage == "navigation"
+    graph.cross_scope = stage == "cross_scope"
+    answer = await service.answer(
+        _security(),
+        AnswerInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert answer.outcome == AnswerOutcome.SUCCESS
+    assert "native_graph_unavailable" in answer.warnings
+    assert cache.puts == []
+
+
+async def test_native_graph_cached_answer_revalidates_source_boundary_before_hit(
+    service_settings: ServiceSettings,
+) -> None:
+    """已有图谱缓存也必须先验证物理来源；边界检查失败不能返回已缓存的旧图答案。"""
+    cache = FakeCache()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一次答案 [C1]", "普通降级答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    first = await service.answer(_security(), value)
+    assert first.cache_type == "none" and len(cache.puts) == 1
+    graph.fail_snapshot = True
+    second = await service.answer(_security(), value)
+    assert second.cache_type == "none" and "普通降级" in second.answer
+    assert len(llm.requests) == 2 and len(cache.puts) == 1
+
+
+@pytest.mark.parametrize("change", ["generation", "configuration", "disable", "stale"])
+async def test_native_graph_state_transitions_isolate_answer_caches(
+    service_settings: ServiceSettings,
+    change: str,
+) -> None:
+    """重建、配置改变、禁用和内容失效都改变答案边界，不能命中上次图谱答案。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一次答案 [C1]", "新边界答案 [C1]"],
+        cache=cache,
+    )
+    state, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    previous_boundary = cache.puts[0].boundary
+    if change == "generation":
+        state.graph_generation += 1
+    elif change == "configuration":
+        state.configuration_version += 1
+    elif change == "disable":
+        state.configuration = replace(state.configuration, enabled=False)
+        state.configuration_version += 1
+    else:
+        state.status = GraphStatus.STALE
+    result = await service.answer(_security(), value)
+    assert result.cache_type == "none"
+    assert len(cache.puts) == 2 and cache.puts[-1].boundary != previous_boundary
+    if change in {"disable", "stale"}:
+        assert len(graph.navigation_calls) == 1
+
+
+async def test_native_graph_success_can_hit_cache_without_repeat_model_navigation(
+    service_settings: ServiceSettings,
+) -> None:
+    """边界不变且来源复核成功可命中缓存，缓存检查不再次调用收费图谱导航。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    second = await service.answer(_security(), value)
+    assert second.cache_type == "exact"
+    assert len(graph.snapshot_calls) == 2 and len(graph.navigation_calls) == 1
+    assert cache.puts[0].boundary.graph_mode == "native"
+
+
+async def test_native_graph_stream_timeout_does_not_cache_degraded_answer(
+    service_settings: ServiceSettings,
+) -> None:
+    """SSE 路径与普通问答同样隔离图谱边界，图谱超时后的降级答案不写正常缓存。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[], cache=cache)
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.fail_navigation = True
+    events = [
+        event
+        async for event in service.stream_answer(
+            _security(), AnswerInput((knowledge_base.id,), "synthetic question")
+        )
+    ]
+    completed = next(event for event in events if event.event == "completed")
+    assert "native_graph_unavailable" in completed.data["warnings"]
+    assert cache.puts == []
+
+
+async def test_native_graph_empty_snapshot_uses_known_off_boundary_without_model_calls(
+    service_settings: ServiceSettings,
+) -> None:
+    """空图保持明确可诊断的普通模式，无需调用图谱模型，也不产生虚假图谱证据。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.empty = True
+    result = await service.retrieve(
+        _security(), RetrievalInput((knowledge_base.id,), "synthetic question")
+    )
+    assert "native_graph_empty" in result.warnings
+    assert result.graph_mode == "off" and graph.navigation_calls == []
+
+
+async def test_native_graph_many_libraries_respect_total_model_call_budget(
+    service_settings: ServiceSettings,
+) -> None:
+    """多知识库增强不能按库数无界扩张；超出预算继续普通检索且不缓存不完整增强。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    state, states, graph = _enable_native_graph(service, knowledge_base)
+    libraries = tuple(replace(knowledge_base, id=uuid4()) for _ in range(4))
+    states.states = tuple(replace(state, knowledge_base_id=kb.id) for kb in libraries)
+    plan = await service._native_graph_plan(libraries, metadata_filter=None)
+    assert len(graph.snapshot_calls) == 2 and len(plan.targets) == 2
+    assert "native_graph_budget_exhausted" in plan.warnings
+    assert not plan.cacheable

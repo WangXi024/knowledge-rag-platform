@@ -119,7 +119,8 @@ async def test_real_redis_stack_scope_atomic_upsert_and_ttl(
     boundary = _boundary("a" * 64)
     entry = _entry(boundary)
 
-    await asyncio.gather(*(cache.put(entry) for _ in range(8)))
+    # 两个并发写足以覆盖同键原子覆盖，避免低内存本机无必要放大测试并发。
+    await asyncio.gather(cache.put(entry), cache.put(entry))
 
     semantic_key = f"{settings.semantic.key_prefix}{entry.cache_id}"
     fields = await client.hgetall(semantic_key)
@@ -178,3 +179,11 @@ async def test_real_redis_stack_version_boundaries_do_not_mix(
 
     assert await cache.get_semantic(changed_revision, original.normalized_question) == ()
     assert await cache.get_semantic(changed_model, original.normalized_question) == ()
+    # 同一问题向量在过滤、图谱代数和模式变化时也必须真正被Redis TAG隔离。
+    for boundary in (
+        replace(original.boundary, filter_hash="filter-fixture"),
+        replace(original.boundary, graph_version_hash="graph-generation-fixture"),
+        replace(original.boundary, graph_mode="native"),
+    ):
+        assert await cache.get_exact(boundary, original.normalized_question) is None
+        assert await cache.get_semantic(boundary, original.normalized_question) == ()

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+from rag_service.application.graph import GraphService
 from rag_service.application.indexing import (
     attach_embeddings,
     build_hierarchical_nodes,
@@ -29,6 +30,7 @@ from rag_service.domain.errors import (
     RagError,
     ResourceNotFoundError,
 )
+from rag_service.domain.graph import GraphRepository, native_graph_parser_config
 from rag_service.domain.models import (
     DocumentRecord,
     DocumentStatus,
@@ -184,6 +186,8 @@ class IngestionWorker:
         media_processor: MediaProcessingPort | None = None,
         profiles: ProfileCatalog | None = None,
         versions: DocumentVersionRepository | None = None,
+        graph_service: GraphService | None = None,
+        graphs: GraphRepository | None = None,
     ) -> None:
         """注入摄取依赖，以及可选的 Gateway 侧车索引组件。
 
@@ -219,6 +223,8 @@ class IngestionWorker:
         self._media_processor = media_processor
         self._profiles = profiles
         self._versions = versions
+        self._graph_service = graph_service
+        self._graphs = graphs
 
     async def execute(
         self,
@@ -821,6 +827,12 @@ class IngestionWorker:
                 if self._profiles is not None
                 else None
             )
+            if document_parser_configuration is not None and self._graphs is not None:
+                graph = await self._graphs.get(job.security_scope_id, document.knowledge_base_id)
+                if graph is not None:
+                    document_parser_configuration.parser_config["graphrag"] = (
+                        native_graph_parser_config(graph.configuration)
+                    )
             try:
                 await self._rag_engine.start_parse(
                     ParseDocumentCommand(
@@ -1726,6 +1738,12 @@ class IngestionWorker:
             parser_ref=version.parser_profile_ref,
             chunk_ref=version.chunk_profile_ref,
         )
+        if self._graphs is not None:
+            graph = await self._graphs.get(job.security_scope_id, document.knowledge_base_id)
+            if graph is not None:
+                configuration.parser_config["graphrag"] = native_graph_parser_config(
+                    graph.configuration
+                )
         current = await self._rag_engine.get_document_version(
             GetEngineDocumentVersionQuery(
                 security=security,
@@ -2046,4 +2064,7 @@ class IngestionWorker:
             security_scope_id, knowledge_base_id,
         ):
             raise ResourceNotFoundError("RAG-KB-001", "知识库不存在")
+        # 内容版本与图谱失效在同一事务中提交；自动任务只在内容实际发布后创建。
+        if self._graph_service is not None:
+            await self._graph_service.content_changed(security_scope_id, knowledge_base_id)
         await self._checkpoint()
