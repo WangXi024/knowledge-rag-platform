@@ -146,6 +146,27 @@ DO $$ BEGIN
 ('feedback_record', 'corrected_answer', 'text', false),
 ('feedback_record', 'created_at', 'timestamp with time zone', true),
 ('idempotency_record', 'security_scope_id', 'character(64)', true),
+('graph_state', 'security_scope_id', 'character(64)', true),
+('graph_state', 'knowledge_base_id', 'uuid', true),
+('graph_state', 'enabled', 'boolean', true),
+('graph_state', 'profile_ref', 'character varying(128)', true),
+('graph_state', 'auto_build', 'boolean', true),
+('graph_state', 'retrieval_enabled', 'boolean', true),
+('graph_state', 'status', 'character varying(24)', true),
+('graph_state', 'target_content_revision', 'bigint', true),
+('graph_state', 'built_for_revision', 'bigint', false),
+('graph_state', 'graph_generation', 'bigint', true),
+('graph_state', 'configuration_version', 'bigint', true),
+('graph_state', 'row_version', 'bigint', true),
+('graph_state', 'engine_task_id', 'character varying(128)', false),
+('graph_state', 'job_id', 'uuid', false),
+('graph_state', 'last_error_code', 'character varying(64)', false),
+('graph_state', 'last_error_message', 'text', false),
+('graph_state', 'queued_at', 'timestamp with time zone', false),
+('graph_state', 'started_at', 'timestamp with time zone', false),
+('graph_state', 'completed_at', 'timestamp with time zone', false),
+('graph_state', 'created_at', 'timestamp with time zone', true),
+('graph_state', 'updated_at', 'timestamp with time zone', true),
 ('idempotency_record', 'idempotency_key', 'character varying(128)', true),
 ('idempotency_record', 'http_method', 'character varying(8)', true),
 ('idempotency_record', 'request_path', 'character varying(255)', true),
@@ -235,8 +256,9 @@ DO $$ BEGIN
       RAISE EXCEPTION '对象所有者不符'; END IF;
 END $$;
 DO $$ BEGIN
-    IF (SELECT count(*) FROM rag_app.alembic_version WHERE version_num='0006_document_version_updates'
-      AND release_version='V1.1.0' AND schema_checksum='6f61654d651c73816a9dd85db3a55bfbd8f5ab5f1296908de60d93aa873f3109') <> 1
+    -- V1.2 必须先执行独立增量 SQL，不能仅通过重写版本行绕过新表/约束验收。
+    IF (SELECT count(*) FROM rag_app.alembic_version WHERE version_num='0007_native_graphrag'
+      AND release_version='V1.2.0' AND schema_checksum='b8b9d47888f009e8b1800eab08092eef3227cbff69b50a81f7a51746e3833c49') <> 1
       OR (SELECT count(*) FROM rag_app.alembic_version) <> 1 THEN RAISE EXCEPTION '发布基线错误'; END IF;
 END $$;
 -- 固定迁移中的结构对象必须存在；允许官方 RAGFlow 产生已审阅的额外对象。
@@ -322,6 +344,13 @@ DO $$ BEGIN
 ('constraint','idempotency_record','chk_idempotency_scope'),
 ('constraint','idempotency_record','chk_idempotency_status'),
 ('constraint','idempotency_record','idempotency_record_pkey'),
+('constraint','graph_state','graph_state_pkey'),
+('constraint','graph_state','fk_graph_state_knowledge_base'),
+('constraint','graph_state','chk_graph_state_scope'),
+('constraint','graph_state','chk_graph_state_status'),
+('constraint','graph_state','chk_graph_state_versions'),
+('constraint','graph_state','chk_graph_state_ready_version'),
+('constraint','ingestion_job','chk_graph_job_knowledge_base'),
 ('constraint','ingestion_job','chk_job_attempt'),
 ('constraint','ingestion_job','chk_job_progress'),
 ('constraint','ingestion_job','chk_job_scope'),
@@ -364,6 +393,8 @@ DO $$ BEGIN
 ('index','','idx_entity_relation_source_chunks_gin'),
 ('index','','idx_feedback_scope_request'),
 ('index','','idx_feedback_scope_type'),
+('index','','idx_graph_state_scope_status'),
+('index','','uk_graph_job_inflight'),
 ('index','','idx_idempotency_scope_expiry'),
 ('index','','idx_index_node_scope_kb_type'),
 ('index','','idx_index_node_source_chunks_gin'),

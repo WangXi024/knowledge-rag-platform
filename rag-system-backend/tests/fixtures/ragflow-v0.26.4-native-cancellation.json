@@ -1,0 +1,43 @@
+{
+  "version": "v0.26.4",
+  "synthetic_only": true,
+  "api_only": true,
+  "executor_running": false,
+  "missing_task_is_not_termination": true,
+  "note": "Captured official responses from synthetic API-only acceptance. The graph executor was not running. An empty task record does not confirm executor termination.",
+  "build": {
+    "method": "POST",
+    "path": "/api/v1/datasets/dataset-a/index",
+    "query": "type=graph",
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {
+        "task_id": "task-1"
+      }
+    },
+    "elapsed_ms": 47.0
+  },
+  "cancel": {
+    "method": "DELETE",
+    "path": "/api/v1/datasets/dataset-a/index",
+    "query": "type=graph&wipe=false",
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {}
+    },
+    "elapsed_ms": 16.0
+  },
+  "after_cancel": {
+    "method": "GET",
+    "path": "/api/v1/datasets/dataset-a/index",
+    "query": "type=graph",
+    "status": 200,
+    "body": {
+      "code": 0,
+      "data": {}
+    },
+    "elapsed_ms": 16.0
+  }
+}

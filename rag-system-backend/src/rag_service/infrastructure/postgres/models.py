@@ -55,14 +55,14 @@ class TimestampMixin:
 
 
 class ConfigProfileRow(Base, TimestampMixin):
-    """版本化配置表；类型+名称+版本唯一，内容以 JSONB 和 SHA-256 保存。"""
+    """版本化配置表；类型+名称+版本唯一，GRAPH 方案也通过 JSONB 与摘要保持不可变。"""
     __tablename__ = "config_profile"
     __table_args__ = (
         UniqueConstraint("profile_type", "name", "version", name="uk_config_profile_name_version"),
         CheckConstraint("version > 0", name="chk_config_profile_version"),
         CheckConstraint(
             "profile_type IN "
-            "('PARSER','CHUNK','EMBEDDING','RETRIEVAL','RERANK','PROMPT','MODEL','CACHE')",
+            "('PARSER','CHUNK','EMBEDDING','RETRIEVAL','RERANK','PROMPT','MODEL','CACHE','GRAPH')",
             name="chk_config_profile_type",
         ),
         Index("idx_config_profile_enabled", "profile_type", "enabled"),
@@ -546,7 +546,7 @@ class EntityRelationRow(Base, TimestampMixin):
 
 
 class IngestionJobRow(Base, TimestampMixin):
-    """可认领/续租/重试的异步任务表，JSONB 保存类型特定输入和结果。"""
+    """可恢复任务表；每个资源知识库最多一项在途 GRAPH_BUILD，其他任务沿用原队列。"""
     __tablename__ = "ingestion_job"
     __table_args__ = (
         UniqueConstraint("security_scope_id", "id", name="uk_ingestion_job_scope_id"),
@@ -568,8 +568,12 @@ class IngestionJobRow(Base, TimestampMixin):
         CheckConstraint(
             "job_type IN "
             "('UPLOAD','PARSE','REPARSE','UPDATE_DOCUMENT',"
-            "'DELETE_DOCUMENT','DELETE_KB','CLEANUP')",
+            "'DELETE_DOCUMENT','DELETE_KB','CLEANUP','GRAPH_BUILD')",
             name="chk_job_type",
+        ),
+        CheckConstraint(
+            "job_type <> 'GRAPH_BUILD' OR knowledge_base_id IS NOT NULL",
+            name="chk_graph_job_knowledge_base",
         ),
         CheckConstraint(
             "status IN "
@@ -587,6 +591,13 @@ class IngestionJobRow(Base, TimestampMixin):
         ),
         Index("idx_job_scope_document", "security_scope_id", "document_id", "created_at"),
         Index("idx_job_scope_kb", "security_scope_id", "knowledge_base_id", "created_at"),
+        Index(
+            "uk_graph_job_inflight", "security_scope_id", "knowledge_base_id", unique=True,
+            postgresql_where=text(
+                "job_type = 'GRAPH_BUILD' AND status IN "
+                "('PENDING','RUNNING','RETRY_WAIT','CANCEL_REQUESTED')"
+            ),
+        ),
         {"schema": SCHEMA},
     )
 

@@ -3,21 +3,35 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
+from starlette.types import Message, Scope
 
+from rag_service.api.online_routes import _ClosingStreamingResponse, _stream_sse_events
 from rag_service.application.online import (
     AnswerInput,
     HistoryMessage,
     OnlineService,
     RetrievalInput,
+    StreamEvent,
 )
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.errors import LlmError, ResourceNotFoundError
+from rag_service.domain.graph import (
+    GraphConfiguration,
+    GraphNavigation,
+    GraphPort,
+    GraphRepository,
+    GraphSnapshot,
+    GraphState,
+    GraphStatus,
+)
 from rag_service.domain.models import (
     AnswerOutcome,
     Citation,
@@ -345,6 +359,45 @@ class CancellingSlowLlm(FakeLlm):
         raise AssertionError("slow LLM should have been cancelled")
 
 
+class ClosingStreamingLlm(FakeLlm):
+    """等待显式取消的流式模型端口，记录生产协程和异步关闭是否都已完成。
+
+    本替身只使用当前事件循环，不访问网络；用于证明真实响应断连会沿嵌套生成器传播，
+    而不是仅修改审计状态后把模型生成留成孤儿任务。
+    """
+
+    def __init__(self, *, emit_first_delta: bool = False) -> None:
+        """创建确定性断连信号；可先产出一帧，以覆盖消费者停在答案 yield 时的关闭。"""
+        super().__init__([])
+        self.emit_first_delta = emit_first_delta
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.cancelled = False
+        self.producer: asyncio.Task[object] | None = None
+
+    def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+        """返回真实异步生成器；只有调用者取消正在等待的下一项才会标记取消。"""
+        self.requests.append(request)
+
+        async def events() -> AsyncIterator[LlmEvent]:
+            """先通知已进入模型，再无限等待；收尾必须跨检查点完成资源释放。"""
+            self.producer = asyncio.current_task()
+            self.started.set()
+            try:
+                if self.emit_first_delta:
+                    yield LlmEvent(delta="合成事实")
+                await anyio.sleep_forever()
+                yield LlmEvent(delta="unreachable")
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            finally:
+                await anyio.lowlevel.checkpoint()
+                self.closed.set()
+
+        return events()
+
+
 class FakeCache:
     def __init__(self) -> None:
         self.entry: CacheEntry | None = None
@@ -455,6 +508,133 @@ class MemoryQueries:
         self.feedback.append(value)
 
 
+class SnapshotQueries(MemoryQueries):
+    """用独立快照和真实 AnyIO 检查点模拟短事务审计，防止取消测试误把内存修改当提交。
+
+    共享同一 QueryRecord 引用会使未完成的 CANCELLED 写入也看似成功；本实现只有经过
+    异步检查点的 update 才保存副本，使未屏蔽外层取消的错误逻辑稳定失败。
+    """
+
+    def __init__(self) -> None:
+        """保留已有仓库行为，并单独记录真正完成持久化步骤的状态。"""
+        super().__init__()
+        self.persisted_statuses: list[QueryStatus] = []
+
+    async def add(self, security_scope_id: str, value: QueryRecord) -> None:
+        """在可取消检查点之后保存副本，模拟数据库独立事务完成的边界。"""
+        await anyio.lowlevel.checkpoint()
+        await super().add(security_scope_id, replace(value))
+
+    async def get(self, security_scope_id: str, request_id: UUID) -> QueryRecord | None:
+        """通过真实检查点读取副本，使取消中的终态回读也必须受到 shield 保护。"""
+        await anyio.lowlevel.checkpoint()
+        value = await super().get(security_scope_id, request_id)
+        return replace(value) if value is not None else None
+
+    async def update(self, security_scope_id: str, value: QueryRecord) -> bool:
+        """只有检查点成功通过才记录提交，取消中的 shield 缺失不能靠共享引用假通过。"""
+        await anyio.lowlevel.checkpoint()
+        updated = await super().update(security_scope_id, replace(value))
+        if updated:
+            self.persisted_statuses.append(value.request_status)
+        return updated
+
+
+class MemoryNativeGraphStates:
+    """按安全范围保存图谱状态，单测可改变代数或配置模拟构图和缓存失效。"""
+
+    def __init__(self, states: tuple[GraphState, ...]) -> None:
+        """保存显式范围状态及查询轨迹，不访问数据库。"""
+        self.states = states
+        self.calls: list[tuple[str, UUID]] = []
+
+    async def get(self, security_scope_id: str, knowledge_base_id: UUID) -> GraphState | None:
+        """只返回当前资源范围对应图谱，跨范围状态不会进入路由或缓存摘要。"""
+        self.calls.append((security_scope_id, knowledge_base_id))
+        return next(
+            (
+                state
+                for state in self.states
+                if state.security_scope_id == security_scope_id
+                and state.knowledge_base_id == knowledge_base_id
+            ),
+            None,
+        )
+
+
+class FakeNativeGraph:
+    """只返回导航词的原生图谱假端口，用于证明生成摘要从不成为证据。"""
+
+    def __init__(self) -> None:
+        """初始化无故障、有实体图谱，可独立模拟快照或导航故障。"""
+        self.snapshot_calls: list[tuple[str, UUID, int]] = []
+        self.navigation_calls: list[tuple[str, UUID, int, str]] = []
+        self.fail_snapshot = False
+        self.fail_navigation = False
+        self.cross_scope = False
+        self.empty = False
+
+    async def snapshot(
+        self, security_scope_id: str, knowledge_base_id: UUID, graph_generation: int
+    ) -> GraphSnapshot:
+        """模拟不收费的结构/来源边界检查；失败表示无法可靠证明当前来源。"""
+        self.snapshot_calls.append((security_scope_id, knowledge_base_id, graph_generation))
+        if self.fail_snapshot:
+            raise TimeoutError("synthetic graph snapshot timeout")
+        return GraphSnapshot(
+            security_scope_id,
+            knowledge_base_id,
+            graph_generation,
+            entity_count=0 if self.empty else 2,
+        )
+
+    async def navigate(
+        self,
+        security_scope_id: str,
+        knowledge_base_id: UUID,
+        graph_generation: int,
+        question: str,
+        *,
+        limit: int = 8,
+    ) -> GraphNavigation:
+        """返回有限独特导航词或合成超时，不提供可被误用的摘要正文。"""
+        self.navigation_calls.append(
+            (security_scope_id, knowledge_base_id, graph_generation, question)
+        )
+        if self.fail_navigation:
+            raise TimeoutError("synthetic graph model timeout")
+        return GraphNavigation(
+            "foreign-scope" if self.cross_scope else security_scope_id,
+            knowledge_base_id,
+            graph_generation,
+            entities=("native_unique_entity",),
+            keywords=("native_unique_entity",),
+        )
+
+
+def _enable_native_graph(
+    service: OnlineService,
+    knowledge_base: KnowledgeBase,
+) -> tuple[GraphState, MemoryNativeGraphStates, FakeNativeGraph]:
+    """把 READY 且匹配内容版本的图谱注入既有离线服务测试夹具。"""
+    state = GraphState(
+        knowledge_base.security_scope_id,
+        knowledge_base.id,
+        configuration=GraphConfiguration(enabled=True),
+        status=GraphStatus.READY,
+        built_for_revision=knowledge_base.revision,
+        target_content_revision=knowledge_base.revision,
+        graph_generation=2,
+        configuration_version=1,
+    )
+    states = MemoryNativeGraphStates((state,))
+    graph = FakeNativeGraph()
+    service._graphs = cast(GraphRepository, states)
+    service._native_graph = cast(GraphPort, graph)
+    service._graph_enabled = True
+    return state, states, graph
+
+
 def _security(tenant: str = "tenant") -> SecurityContext:
     return SecurityContext.create(
         subject_id="subject",
@@ -502,7 +682,8 @@ def _resources(
         score=0.9,
         resource_scope_id=security.tenant_resource_scope_id,
         vector_score=0.9,
-        positions=(SourcePosition(page=1, bbox=(0, 0, 1, 1)),),
+        # 与真实 TXT 适配器契约一致：无物理页码，也没有页面坐标。
+        positions=(),
     )
     return knowledge_base, document, candidate
 
@@ -765,9 +946,7 @@ async def test_retrieval_semantically_deduplicates_near_identical_candidates(
     )
 
     assert [item.chunk_id for item in result.candidates] == [first.chunk_id]
-    assert embedding.requests == [
-        ("这是最小非业务合成证据。", "这是最小非业务合成证据!")
-    ]
+    assert embedding.requests == [("这是最小非业务合成证据。", "这是最小非业务合成证据!")]
     assert "semantic_candidate_dedup_bypassed" not in result.warnings
 
 
@@ -1317,9 +1496,7 @@ async def test_metadata_filter_bypasses_sidecar_routes_to_preserve_scope(
             query="Summarize the main points of this document.",
             metadata_filter={
                 "logic": "and",
-                "conditions": [
-                    {"field": "language", "operator": "eq", "value": "en"}
-                ],
+                "conditions": [{"field": "language", "operator": "eq", "value": "en"}],
             },
         ),
     )
@@ -1421,9 +1598,7 @@ async def test_chinese_query_over_english_kb_uses_bilingual_vector_and_english_b
 
     assert result.original_query == "每支球队可以同时有多少名球员在场上?"
     assert result.effective_query == translated
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1463,9 +1638,7 @@ async def test_english_query_over_chinese_kb_adds_chinese_vector_and_bm25(
     assert result.effective_query == translated
     assert result.query_variants == {"zh-CN": translated, "en-US": result.original_query}
     assert result.knowledge_languages == ("zh-CN",)
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1524,9 +1697,7 @@ async def test_mixed_language_kb_uses_both_bm25_routes_and_weighted_rrf(
     )
 
     assert result.knowledge_languages == ("zh-CN", "en-US")
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (result.original_query, 0.0),
         (translated, 1.0),
@@ -1562,9 +1733,7 @@ async def test_english_query_over_mixed_kb_uses_chinese_and_english_routes(
 
     assert result.effective_query == result.original_query
     assert result.query_variants == {"zh-CN": translated, "en-US": result.original_query}
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (result.original_query, 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1718,9 +1887,7 @@ async def test_answer_exposes_rewritten_query_and_preserves_it_in_cache(
     assert second.original_query == first.original_query
     assert second.effective_query == first.effective_query
     assert second.cache_type == "exact"
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (first.original_query, 1.0),
         (first.effective_query, 1.0),
         (first.effective_query, 0.0),
@@ -1945,9 +2112,7 @@ async def test_sse_translates_chinese_for_retrieval_but_answers_original_questio
     assert retrieval_event.data["original_query"] == "球员累计五次犯规后会怎样?"
     assert retrieval_event.data["effective_query"] == translated
     assert retrieval_event.data["query_rewritten"] is True
-    assert [
-        (item.question, item.vector_similarity_weight) for item in engine.queries
-    ] == [
+    assert [(item.question, item.vector_similarity_weight) for item in engine.queries] == [
         (retrieval_event.data["original_query"], 1.0),
         (translated, 1.0),
         (translated, 0.0),
@@ -1981,6 +2146,176 @@ async def test_exact_cache_hit_revalidates_citation_and_skips_downstream(
     assert len(llm.requests) == 1
     assert len(engine.queries) == 2
     assert second.citations[0].citation_id != first.citations[0].citation_id
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("filename,mime_type", [("fixture.pdf", "application/pdf"),
+                                               ("fixture.png", "image/png")])
+@pytest.mark.asyncio
+async def test_paged_source_positions_remain_valid_in_exact_and_semantic_cache(
+    service_settings: ServiceSettings, semantic: bool, filename: str, mime_type: str,
+) -> None:
+    """文本占位过滤不影响 PDF/图片的真实页码坐标，也不无故使其缓存失效。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, document = _service(
+        service_settings, llm_responses=["真实页面证据 [C1]"], cache=cache,
+    )
+    document.filename, document.mime_type = filename, mime_type
+    position = SourcePosition(page=2, bbox=(0.0, 1.0, 2.0, 3.0))
+    engine.vector = engine.term = tuple(
+        replace(item, document_name=filename, positions=(position,)) for item in engine.vector
+    )
+    value = AnswerInput(knowledge_base_ids=(knowledge_base.id,), query="paged source cache")
+    first = await service.answer(_security(), value)
+    assert first.citations[0].positions == (position,)
+    assert first.citations[0].page_start == first.citations[0].page_end == 2
+    if semantic:
+        cache.semantic_entry, cache.entry = cache.entry, None
+
+    replay = await service.answer(_security(), replace(value, request_id=uuid4()))
+
+    assert replay.cache_type == ("semantic" if semantic else "exact")
+    assert replay.citations[0].positions == (position,)
+    assert replay.citations[0].page_start == replay.citations[0].page_end == 2
+    assert len(llm.requests) == 1 and len(engine.queries) == 2
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("invalid_location", ["range", "page", "bbox"])
+@pytest.mark.asyncio
+async def test_pageless_text_rejects_old_position_cache_for_json_and_sse(
+    service_settings: ServiceSettings, semantic: bool, streaming: bool, invalid_location: str,
+) -> None:
+    """精确/语义旧缓存中的文本页码或坐标不能污染 JSON/SSE，新答案重新回读证据。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=["旧答案 [C1]", "重新生成答案 [C1]"], cache=cache,
+    )
+    value = AnswerInput(knowledge_base_ids=(knowledge_base.id,), query="source location cache")
+    first = await service.answer(_security(), value)
+    assert first.citations[0].positions == ()
+    assert first.citations[0].page_start is first.citations[0].page_end is None
+    assert cache.entry is not None
+    original = cache.entry.citations[0]
+    if invalid_location == "range":
+        corrupted = replace(original, page_start=2, page_end=2)
+    elif invalid_location == "page":
+        corrupted = replace(original, positions=(SourcePosition(page=2),))
+    else:
+        corrupted = replace(original, positions=(SourcePosition(bbox=(1.0, 1.0, 1.0, 1.0)),))
+    stale = replace(cache.entry, citations=(corrupted,))
+    if semantic:
+        cache.entry = None
+        cache.semantic_entry = stale
+    else:
+        cache.entry = stale
+    replay = replace(value, request_id=uuid4())
+    if streaming:
+        events = [event async for event in service.stream_answer(_security(), replay)]
+        assert events[-1].data["cache_type"] == "none"
+        assert events[-1].data["outcome"] == "success"
+        citations = tuple(cast(Citation, event.data["citation"])
+                          for event in events if event.event == "citation")
+    else:
+        fresh = await service.answer(_security(), replay)
+        assert fresh.cache_type == "none" and fresh.answer == "重新生成答案 [C1]"
+        citations = fresh.citations
+    assert len(citations) == 1
+    assert citations[0].positions == ()
+    assert citations[0].page_start is citations[0].page_end is None
+    assert len(llm.requests) == 2 and len(engine.queries) == 4
+    assert len(cache.puts) == 2 and cache.hits == []
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_metadata_filter_isolates_answer_cache_for_json_and_sse(
+    service_settings: ServiceSettings,
+    semantic: bool,
+    streaming: bool,
+) -> None:
+    """同一主体改变 Metadata 范围时，JSON/SSE 都不能复用精确或语义旧答案。
+
+    引擎与 LLM 使用合成替身，仅核验缓存边界和是否重新检索生成；语义场景额外让
+    缓存替身返回旧范围的高相似答案，保证在线服务自己也执行完整边界验证。
+    """
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一范围答案 [C1]", "第二范围答案 [C1]"],
+        cache=cache,
+    )
+    value = AnswerInput(
+        knowledge_base_ids=(knowledge_base.id,),
+        query="filtered cache question",
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "department", "operator": "eq", "value": "first"}],
+        },
+    )
+    await service.answer(_security(), value)
+    if semantic:
+        cache.semantic_entry = cache.entry
+    changed = replace(
+        value,
+        query="similar filtered cache question" if semantic else value.query,
+        request_id=uuid4(),
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "department", "operator": "eq", "value": "second"}],
+        },
+    )
+
+    if streaming:
+        events = [event async for event in service.stream_answer(_security(), changed)]
+        assert events[-1].data["cache_type"] == "none"
+        assert events[-1].data["outcome"] == "success"
+    else:
+        result = await service.answer(_security(), changed)
+        assert result.cache_type == "none"
+        assert result.answer == "第二范围答案 [C1]"
+    assert len(llm.requests) == 2
+    assert len(engine.queries) == 4
+    assert len(cache.puts) == 2
+    assert cache.puts[0].boundary.filter_hash != cache.puts[1].boundary.filter_hash
+
+
+@pytest.mark.asyncio
+async def test_metadata_filter_json_key_order_does_not_split_answer_cache(
+    service_settings: ServiceSettings,
+) -> None:
+    """过滤对象仅 JSON 键顺序变化时复用同一答案，避免规范化缺失导致无效重复计算。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["相同范围答案 [C1]"],
+        cache=cache,
+    )
+    value = AnswerInput(
+        knowledge_base_ids=(knowledge_base.id,),
+        query="canonical filter question",
+        metadata_filter={
+            "logic": "and",
+            "conditions": [{"field": "year", "operator": "eq", "value": 2026}],
+        },
+    )
+    first = await service.answer(_security(), value)
+    reordered = replace(
+        value,
+        request_id=uuid4(),
+        metadata_filter={
+            "conditions": [{"value": 2026, "operator": "eq", "field": "year"}],
+            "logic": "and",
+        },
+    )
+
+    replay = await service.answer(_security(), reordered)
+
+    assert replay.cache_type == "exact"
+    assert replay.answer == first.answer
+    assert len(llm.requests) == 1 and len(engine.queries) == 2
 
 
 @pytest.mark.asyncio
@@ -2226,3 +2561,592 @@ async def test_stream_query_record_and_cancel_are_scope_qualified(
     assert cancelled.request_status == QueryStatus.CANCELLED
     with pytest.raises(ResourceNotFoundError):
         await service.cancel_request(_security("other"), cancel_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_scope", [False, True])
+async def test_stream_aclose_after_accepted_persists_cancelled_snapshot(
+    service_settings: ServiceSettings,
+    cancelled_scope: bool,
+) -> None:
+    """accepted 后直接关闭会抛 GeneratorExit；普通和已取消作用域都必须提交 CANCELLED。"""
+    queries = SnapshotQueries()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="accepted close audit fixture",
+        ),
+    )
+    assert (await anext(stream)).event == "accepted"
+
+    # 先取消 AnyIO 再关闭，迫使审计写入经过受保护的异步检查点，而非同步内存赋值。
+    with anyio.CancelScope() as outer:
+        if cancelled_scope:
+            outer.cancel()
+        await stream.aclose()
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert record is not None
+    assert record.request_status == QueryStatus.CANCELLED
+    assert record.outcome == AnswerOutcome.CANCELLED
+    assert record.completed_at is not None
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, QueryStatus.CANCELLED]
+    assert queries.citations == {}
+    assert llm.requests == []
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_audit", [False, True])
+async def test_stream_aclose_after_first_delta_closes_nested_model_generator(
+    service_settings: ServiceSettings,
+    with_audit: bool,
+) -> None:
+    """消费者停在首个答案 yield 时，关闭必须穿过 deadline/impl 立即释放模型迭代器。"""
+    queries = SnapshotQueries() if with_audit else None
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm(emit_first_delta=True)
+    service._llm = llm
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="first delta close nested iterator fixture",
+        ),
+    )
+    try:
+        async with asyncio.timeout(2):
+            async for event in stream:
+                if event.event == "answer.delta":
+                    break
+    finally:
+        await stream.aclose()
+
+    assert llm.started.is_set()
+    assert llm.closed.is_set()
+    assert llm.producer is asyncio.current_task()
+    assert stream.ag_frame is None
+    if queries is not None:
+        record = await queries.get(_security().security_scope_id, request_id)
+        assert record is not None
+        assert record.request_status == QueryStatus.CANCELLED
+        assert record.outcome == AnswerOutcome.CANCELLED
+        assert QueryStatus.COMPLETED not in queries.persisted_statuses
+        assert queries.citations == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_aclose_immediately_after_completed_keeps_success_and_citations(
+    service_settings: ServiceSettings,
+) -> None:
+    """客户端收到 completed 就断开时，成功审计和真实引用应已提交，不能倒退为取消。"""
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, document = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="close after completed persisted citations fixture",
+        ),
+    )
+    reached_completed = False
+    published: QueryRecord | None = None
+    published_citations: tuple[Citation, ...] = ()
+    try:
+        async with asyncio.timeout(2):
+            async for event in stream:
+                if event.event == "completed":
+                    assert event.data["outcome"] == "success"
+                    # completed 是已发布承诺：消费者尚未继续迭代时，数据库快照也必须完成。
+                    published = await queries.get(_security().security_scope_id, request_id)
+                    published_citations = await queries.list_citations(
+                        _security().security_scope_id, request_id,
+                    )
+                    assert published is not None
+                    assert published.request_status == QueryStatus.COMPLETED
+                    assert published.outcome == AnswerOutcome.SUCCESS
+                    assert len(published_citations) == 1
+                    reached_completed = True
+                    break
+    finally:
+        # 同时模拟已取消的响应作用域；取消清理必须尊重已经发布的持久终态。
+        with anyio.CancelScope() as cancelled:
+            cancelled.cancel()
+            await stream.aclose()
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    citations = await queries.list_citations(_security().security_scope_id, request_id)
+    assert reached_completed
+    assert record is not None
+    assert record.request_status == QueryStatus.COMPLETED
+    assert record.outcome == AnswerOutcome.SUCCESS
+    assert record.answer_text == "合成事实 [C1]"
+    assert record.completed_at is not None
+    assert record == published
+    assert citations == published_citations
+    assert QueryStatus.CANCELLED not in queries.persisted_statuses
+    assert queries.persisted_statuses.count(QueryStatus.COMPLETED) == 1
+    assert len(citations) == 1
+    assert citations[0].knowledge_base_id == knowledge_base.id
+    assert citations[0].document_id == document.id
+    assert citations[0].quote == "这是最小非业务合成证据。"
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [QueryStatus.FAILED, QueryStatus.COMPLETED])
+async def test_stream_aclose_preserves_independently_persisted_terminal_audit(
+    service_settings: ServiceSettings,
+    terminal: QueryStatus,
+) -> None:
+    """收尾期间必须受保护地回读已提交终态，不能用旧 RUNNING 副本覆盖 FAILED/COMPLETED。"""
+    queries = SnapshotQueries()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    request_id = uuid4()
+    stream = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="preserve externally persisted terminal audit fixture",
+        ),
+    )
+    assert (await anext(stream)).event == "accepted"
+    committed = await queries.get(_security().security_scope_id, request_id)
+    assert committed is not None
+    committed.request_status = terminal
+    committed.outcome = (
+        AnswerOutcome.SUCCESS if terminal == QueryStatus.COMPLETED else AnswerOutcome.REFUSED
+    )
+    committed.answer_text = "已保存的终态内容"
+    committed.error_code = "RAG-LLM-001" if terminal == QueryStatus.FAILED else None
+    committed.completed_at = datetime.now(UTC)
+    await queries.update(_security().security_scope_id, committed)
+    expected = replace(committed)
+
+    with anyio.CancelScope() as cancelled:
+        cancelled.cancel()
+        await stream.aclose()
+
+    actual = await queries.get(_security().security_scope_id, request_id)
+    assert actual == expected
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, terminal]
+    assert queries.citations == {}
+    assert llm.requests == []
+    assert stream.ag_frame is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect_at_accepted", [True, False])
+async def test_streaming_response_anyio_disconnect_closes_source_and_commits_cancellation(
+    service_settings: ServiceSettings,
+    disconnect_at_accepted: bool,
+) -> None:
+    """真实 StreamingResponse 的 AnyIO 取消同时覆盖发送 accepted 和等待模型两个断点。
+
+    前者停在 HTTP 发送 accepted，后者已有持久生产者等待模型。两者都必须同步等待
+    原 Task 关闭嵌套生成器，经过可取消检查点提交独立审计副本，并禁止发布 COMPLETED。
+    """
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm()
+    service._llm = llm
+    request_id = uuid4()
+    source = service.stream_answer(
+        _security(),
+        AnswerInput(
+            request_id=request_id,
+            knowledge_base_ids=(knowledge_base.id,),
+            query="real response disconnect cancellation fixture",
+        ),
+    )
+    accepted_sent = asyncio.Event()
+    bodies: list[bytes] = []
+
+    async def connected() -> bool:
+        """断连由真实响应的 receive 监听处理，不提前替应用伪造断开检查结果。"""
+        return False
+
+    async def receive() -> Message:
+        """在指定断点回送 ASGI 断连，让 Starlette 自己取消发送任务的 AnyIO 作用域。"""
+        await (accepted_sent.wait() if disconnect_at_accepted else llm.started.wait())
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        """accepted 发送中暂停以重现背压；另一路允许持久生产者进入模型等待。"""
+        if message["type"] == "http.response.body":
+            body = message.get("body", b"")
+            bodies.append(body)
+            if b"event: accepted\n" in body:
+                accepted_sent.set()
+                if disconnect_at_accepted:
+                    await anyio.sleep_forever()
+        await anyio.lowlevel.checkpoint()
+
+    framed = _stream_sse_events(
+        stream=source,
+        request_id=request_id,
+        heartbeat_seconds=1,
+        disconnected=connected,
+    )
+    response = _ClosingStreamingResponse(framed, media_type="text/event-stream")
+    # ASGI 2.3 分支由 StreamingResponse 使用真实 AnyIO TaskGroup 监听 http.disconnect。
+    scope: Scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+    with anyio.fail_after(2):
+        await response(scope, receive, send)
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert accepted_sent.is_set()
+    assert record is not None
+    assert record.request_status == QueryStatus.CANCELLED
+    assert record.outcome == AnswerOutcome.CANCELLED
+    assert record.completed_at is not None
+    assert queries.persisted_statuses == [QueryStatus.RUNNING, QueryStatus.CANCELLED]
+    assert queries.citations == {}
+    assert not any(b"event: completed\n" in body for body in bodies)
+    assert source.ag_frame is None
+    assert getattr(framed, "ag_frame", None) is None
+    # 单元素队列允许有限预取，accepted 交付时模型可能已启动；启动过就必须结束。
+    if llm.started.is_set():
+        assert llm.started.is_set()
+        assert llm.cancelled is True
+        assert llm.closed.is_set()
+        assert llm.producer is not None and llm.producer.done()
+    else:
+        assert disconnect_at_accepted
+        assert llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_service_deadline_stays_with_one_producer(
+    service_settings: ServiceSettings,
+) -> None:
+    """真实响应跨多帧后，Service 总截止时间仍取消模型并保存 FAILED，不留下生产任务。
+
+    逐帧创建 anext Task 会把 asyncio.timeout 留在已结束的首个 Task；本场景必须在
+    有界时间看到 RAG-LLM-002，而非仅靠测试外层超时终止看似正常的流。
+    """
+    queries = SnapshotQueries()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=[], queries=queries,
+    )
+    llm = ClosingStreamingLlm()
+    service._llm = llm
+    service._answer_settings = AnswersSection(request_deadline_seconds=1)
+    request_id = uuid4()
+    service_stream = service.stream_answer(
+        _security(), AnswerInput(request_id=request_id, knowledge_base_ids=(knowledge_base.id,),
+                                 query="persistent producer deadline fixture"),
+    )
+    owners: list[asyncio.Task[object] | None] = []
+    bodies: list[bytes] = []
+
+    async def source() -> AsyncGenerator[StreamEvent, None]:
+        """记录迭代及关闭的 Task，且显式关闭内部 Service，不把测试自身变成泄漏来源。"""
+        try:
+            async for event in service_stream:
+                owners.append(asyncio.current_task())
+                yield event
+        finally:
+            owners.append(asyncio.current_task())
+            await service_stream.aclose()
+
+    async def connected() -> bool:
+        """保持连接；错误必须来自 Service 的真实总截止时间。"""
+        return False
+
+    async def receive() -> Message:
+        """保持 HTTP 接收端打开，由响应正常结束取消监听，不主动发送断连。"""
+        await anyio.sleep_forever()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        """仅记录真实 StreamingResponse 发出的帧，不修改事件或生产者调度。"""
+        if message["type"] == "http.response.body":
+            bodies.append(message.get("body", b""))
+        await anyio.lowlevel.checkpoint()
+
+    framed = _stream_sse_events(stream=source(), request_id=request_id,
+                               heartbeat_seconds=0.05, disconnected=connected)
+    response = _ClosingStreamingResponse(framed, media_type="text/event-stream")
+    scope: Scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+    with anyio.fail_after(3):
+        await response(scope, receive, send)
+
+    record = await queries.get(_security().security_scope_id, request_id)
+    assert any(b"event: accepted\n" in body for body in bodies)
+    assert any(b'"code":"RAG-LLM-002"' in body for body in bodies)
+    assert not any(b"event: completed\n" in body for body in bodies)
+    assert record is not None and record.request_status == QueryStatus.FAILED
+    assert record.error_code == "RAG-LLM-002"
+    assert QueryStatus.COMPLETED not in queries.persisted_statuses
+    assert QueryStatus.CANCELLED not in queries.persisted_statuses
+    assert llm.cancelled and llm.closed.is_set()
+    assert llm.producer is not None and llm.producer.done()
+    assert owners and all(owner is llm.producer for owner in owners)
+    assert service_stream.ag_frame is None
+
+
+async def test_native_graph_navigates_once_then_retrieves_original_sources(
+    service_settings: ServiceSettings,
+) -> None:
+    """多条双语基础路线只进行一次原生导航，补召回仍只使用普通原文候选。"""
+    service, engine, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成问题"],
+        document_languages=("zh", "en"),
+    )
+    _, states, graph = _enable_native_graph(service, knowledge_base)
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert len(graph.navigation_calls) == 1
+    assert graph.navigation_calls[0][:3] == (
+        knowledge_base.security_scope_id,
+        knowledge_base.id,
+        2,
+    )
+    assert states.calls == [(knowledge_base.security_scope_id, knowledge_base.id)]
+    graph_queries = [query for query in engine.queries if query.question == "native_unique_entity"]
+    assert len(graph_queries) == 1
+    assert graph_queries[0].knowledge_base_ids == (knowledge_base.id,)
+    assert graph_queries[0].vector_similarity_weight == 0.0
+    assert graph_queries[0].security.security_scope_id == knowledge_base.security_scope_id
+    assert "ragflow:graph" in result.retrieval_routes
+    assert result.candidates[0].content == "这是最小非业务合成证据。"
+    assert result.graph_mode == "native_graph_read_v1" and result.graph_cacheable
+    assert result.graph_query_count == 1
+    assert result.graph_source_candidate_count == 1
+    assert result.graph_generations == {str(knowledge_base.id): 2}
+    assert result.graph_elapsed_ms >= 0
+
+
+@pytest.mark.parametrize("restriction", ["metadata", "documents"])
+async def test_native_graph_bypasses_filters_that_upstream_does_not_honor(
+    service_settings: ServiceSettings,
+    restriction: str,
+) -> None:
+    """元数据或文档限定时完全跳过图谱，不让原生全库聚合绕开用户过滤。"""
+    service, engine, _, knowledge_base, document = _service(service_settings, llm_responses=[])
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    metadata = {"logic": "and", "conditions": []} if restriction == "metadata" else None
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput(
+            (knowledge_base.id,),
+            "synthetic question",
+            metadata_filter=metadata,
+            document_ids=(document.id,) if restriction == "documents" else (),
+        ),
+    )
+    assert graph.snapshot_calls == graph.navigation_calls == []
+    assert not any(query.question == "native_unique_entity" for query in engine.queries)
+    expected = "metadata_filter" if restriction == "metadata" else "document_filter"
+    assert f"native_graph_bypassed_{expected}" in result.warnings
+    assert result.graph_mode != "native_graph_read_v1"
+
+
+@pytest.mark.parametrize("condition", ["disabled", "retrieval_disabled", "building", "stale"])
+async def test_native_graph_eligibility_requires_ready_current_enabled_configuration(
+    service_settings: ServiceSettings,
+    condition: str,
+) -> None:
+    """仅当前内容版本的 READY、开启构图及检索的图谱可导航，其余正常走普通检索。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    state, _, graph = _enable_native_graph(service, knowledge_base)
+    if condition == "disabled":
+        state.configuration = replace(state.configuration, enabled=False)
+    elif condition == "retrieval_disabled":
+        state.configuration = replace(state.configuration, retrieval_enabled=False)
+    elif condition == "building":
+        state.status = GraphStatus.BUILDING
+    else:
+        state.built_for_revision = knowledge_base.revision - 1
+    result = await service.retrieve(
+        _security(),
+        RetrievalInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert graph.snapshot_calls == graph.navigation_calls == []
+    assert result.graph_mode == "off" and result.candidates
+
+
+@pytest.mark.parametrize("stage", ["snapshot", "navigation", "cross_scope"])
+async def test_native_graph_failures_degrade_and_never_write_normal_cache(
+    service_settings: ServiceSettings,
+    stage: str,
+) -> None:
+    """图谱超时、来源未知或返回错误范围都降级普通答案，并禁止缓存正常图谱结果。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.fail_snapshot = stage == "snapshot"
+    graph.fail_navigation = stage == "navigation"
+    graph.cross_scope = stage == "cross_scope"
+    answer = await service.answer(
+        _security(),
+        AnswerInput((knowledge_base.id,), "synthetic question"),
+    )
+    assert answer.outcome == AnswerOutcome.SUCCESS
+    assert "native_graph_unavailable" in answer.warnings
+    assert cache.puts == []
+
+
+async def test_native_graph_cached_answer_revalidates_source_boundary_before_hit(
+    service_settings: ServiceSettings,
+) -> None:
+    """已有图谱缓存也必须先验证物理来源；边界检查失败不能返回已缓存的旧图答案。"""
+    cache = FakeCache()
+    service, _, llm, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一次答案 [C1]", "普通降级答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    first = await service.answer(_security(), value)
+    assert first.cache_type == "none" and len(cache.puts) == 1
+    graph.fail_snapshot = True
+    second = await service.answer(_security(), value)
+    assert second.cache_type == "none" and "普通降级" in second.answer
+    assert len(llm.requests) == 2 and len(cache.puts) == 1
+
+
+@pytest.mark.parametrize("change", ["generation", "configuration", "disable", "stale"])
+async def test_native_graph_state_transitions_isolate_answer_caches(
+    service_settings: ServiceSettings,
+    change: str,
+) -> None:
+    """重建、配置改变、禁用和内容失效都改变答案边界，不能命中上次图谱答案。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["第一次答案 [C1]", "新边界答案 [C1]"],
+        cache=cache,
+    )
+    state, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    previous_boundary = cache.puts[0].boundary
+    if change == "generation":
+        state.graph_generation += 1
+    elif change == "configuration":
+        state.configuration_version += 1
+    elif change == "disable":
+        state.configuration = replace(state.configuration, enabled=False)
+        state.configuration_version += 1
+    else:
+        state.status = GraphStatus.STALE
+    result = await service.answer(_security(), value)
+    assert result.cache_type == "none"
+    assert len(cache.puts) == 2 and cache.puts[-1].boundary != previous_boundary
+    if change in {"disable", "stale"}:
+        assert len(graph.navigation_calls) == 1
+
+
+async def test_native_graph_success_can_hit_cache_without_repeat_model_navigation(
+    service_settings: ServiceSettings,
+) -> None:
+    """边界不变且来源复核成功可命中缓存，缓存检查不重复图结构导航。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings,
+        llm_responses=["合成答案 [C1]"],
+        cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    second = await service.answer(_security(), value)
+    assert second.cache_type == "exact"
+    assert len(graph.snapshot_calls) == 2 and len(graph.navigation_calls) == 1
+    assert cache.puts[0].boundary.graph_mode == "native_graph_read_v1"
+
+
+async def test_structural_graph_mode_rejects_previous_kg_exact_and_semantic_cache(
+    service_settings: ServiceSettings,
+) -> None:
+    """同一内容/图代数下，旧 KG 模式答案也不能遮蔽新结构导航的真实结果。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(
+        service_settings, llm_responses=["初次合成答案 [C1]", "重新检索答案 [C1]"], cache=cache,
+    )
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    value = AnswerInput((knowledge_base.id,), "synthetic question")
+    await service.answer(_security(), value)
+    assert cache.entry is not None
+    # 即使缓存层意外返回历史语义条目，应用仍须拒绝不同的实际导航模式。
+    old = replace(cache.entry, boundary=replace(cache.entry.boundary, graph_mode="native"))
+    cache.entry = cache.semantic_entry = old
+    result = await service.answer(_security(), value)
+    assert result.cache_type == "none" and len(graph.navigation_calls) == 2
+    assert len(cache.puts) == 2 and cache.puts[-1].boundary.graph_mode == "native_graph_read_v1"
+
+
+async def test_native_graph_stream_timeout_does_not_cache_degraded_answer(
+    service_settings: ServiceSettings,
+) -> None:
+    """SSE 路径与普通问答同样隔离图谱边界，图谱超时后的降级答案不写正常缓存。"""
+    cache = FakeCache()
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[], cache=cache)
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.fail_navigation = True
+    events = [
+        event
+        async for event in service.stream_answer(
+            _security(), AnswerInput((knowledge_base.id,), "synthetic question")
+        )
+    ]
+    completed = next(event for event in events if event.event == "completed")
+    assert "native_graph_unavailable" in completed.data["warnings"]
+    assert cache.puts == []
+
+
+async def test_native_graph_empty_snapshot_uses_known_off_boundary_without_model_calls(
+    service_settings: ServiceSettings,
+) -> None:
+    """空图保持明确可诊断的普通模式，无需调用图谱模型，也不产生虚假图谱证据。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    _, _, graph = _enable_native_graph(service, knowledge_base)
+    graph.empty = True
+    result = await service.retrieve(
+        _security(), RetrievalInput((knowledge_base.id,), "synthetic question")
+    )
+    assert "native_graph_empty" in result.warnings
+    assert result.graph_mode == "off" and graph.navigation_calls == []
+
+
+async def test_native_graph_many_libraries_respect_total_model_call_budget(
+    service_settings: ServiceSettings,
+) -> None:
+    """多知识库增强不能按库数无界扩张；超出预算继续普通检索且不缓存不完整增强。"""
+    service, _, _, knowledge_base, _ = _service(service_settings, llm_responses=[])
+    state, states, graph = _enable_native_graph(service, knowledge_base)
+    libraries = tuple(replace(knowledge_base, id=uuid4()) for _ in range(4))
+    states.states = tuple(replace(state, knowledge_base_id=kb.id) for kb in libraries)
+    plan = await service._native_graph_plan(libraries, metadata_filter=None)
+    assert len(graph.snapshot_calls) == 2 and len(plan.targets) == 2
+    assert "native_graph_budget_exhausted" in plan.warnings
+    assert not plan.cacheable

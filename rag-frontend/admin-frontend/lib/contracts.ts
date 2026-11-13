@@ -98,3 +98,30 @@ export interface JobState {
   progress: number;
   error?: { code?: string; message?: string } | null;
 }
+
+/** 原生图谱只提供受控知识库配置，模型凭据不属于浏览器契约。 */
+export interface GraphConfiguration {
+  enabled: boolean;
+  profile_ref: 'native-graph-light@1';
+  auto_build: boolean;
+  retrieval_enabled: boolean;
+}
+
+export type GraphStatus = 'DISABLED' | 'NOT_BUILT' | 'QUEUED' | 'BUILDING' | 'READY' | 'STALE' | 'FAILED' | 'CANCELLING';
+
+/** 保留内容版本、构图代数和任务诊断；202 接收不能被解释为图谱就绪。 */
+export interface KnowledgeGraphState {
+  knowledge_base_id: string;
+  configuration: GraphConfiguration;
+  status: GraphStatus;
+  target_content_revision: number;
+  built_for_revision: number | null;
+  graph_generation: number;
+  configuration_version: number;
+  job_id: string | null;
+  last_error: { code: string; message: string; retryable?: boolean } | null;
+  queued_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}

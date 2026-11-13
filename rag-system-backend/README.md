@@ -22,6 +22,10 @@ PostgreSQL、Redis Stack 语义缓存，以及固定版本 RAGFlow 的完整本�
   再以带时间戳 Markdown 交给 RAGFlow 建索引。
 - 检索：向量 + BM25 + 加权 RRF；可选 Rerank 使用项目约定的真实 Cross-Encoder
   `POST /rerank` 协议，故障时自动保留 RRF 排名。
+- 原生图谱：新增默认关闭的 RAGFlow v0.26.4 GraphRAG 一期接入，包含独立 Chat
+  登记、知识库配置、异步构建/取消、管理界面及原文补召回。四组模型最小 API
+  请求已通过，原生构建到检索引用的完整流程仍待真实验收；严格物理版本边界和
+  过滤旁路见 [原生 GraphRAG 接入与验收](docs/NATIVE_GRAPHRAG.md)。
 - 切块与索引优化：新文件按正文、表格、视觉和媒体文件族自动选择不可变 Chunk
   Profile；`hybrid-structure-aware@6` 按问题类型动态选择 Top-K，并在 0.40 侧车
   相似度门槛后提供文档摘要、章节、标题/长度动态 Parent、表格行组及实体/显式关系导航。
@@ -122,3 +126,5 @@ Domain/Application 核心分支覆盖率门禁为 80%，并在 CI 中使用 Post
   当前完成内容、未完成项、技术债和分阶段改进路线。
 - [`docs/CODEBASE_STRUCTURE.md`](docs/CODEBASE_STRUCTURE.md)：
   项目架构、逐目录/逐文件职责、API、数据表、运行流程和修改定位指南。
+- [`docs/NATIVE_GRAPHRAG.md`](docs/NATIVE_GRAPHRAG.md)：
+  默认关闭开关、管理接口、检索与引用边界、取消限制和串行手动验收。

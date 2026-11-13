@@ -183,12 +183,14 @@ class StopEngineDocumentVersionCommand:
 
 @dataclass(frozen=True, slots=True)
 class ListEngineVersionChunksQuery:
-    """读取候选版本的原始 Chunk，并映射回稳定逻辑 document_id。"""
+    """读取候选原始 Chunk；文件格式必须来自候选版本，不能沿用旧活动版。"""
 
     security: SecurityContext
     knowledge_base_id: UUID
     document_id: UUID
     engine_document_id: str
+    filename: str
+    mime_type: str
     page: int = 1
     page_size: int = 20
 
@@ -706,8 +708,10 @@ class RerankPort(Protocol):
 class CacheBoundary:
     """所有会改变答案语义的缓存隔离维度。
 
-    除租户外还包含知识库修订、检索/Prompt/模型版本、语言和历史摘要，因此缓存命中
-    等价于“同一问题在完全相同运行条件下已有答案”。
+    除租户外还包含知识库修订、检索/Prompt/模型版本、语言、历史和过滤范围摘要。
+    图谱版本与模式拥有独立维度，后续启用或重建图谱时不会误用普通检索的旧答案。
+    三个新增字段的默认值仅兼容已有内存构造方；持久缓存读取必须显式携带这些字段，
+    不能用默认值猜测历史答案当时是否执行了过滤或图谱检索。
     """
 
     security_scope_id: str
@@ -717,6 +721,9 @@ class CacheBoundary:
     model_profile: str
     language: str
     history_hash: str
+    filter_hash: str = "none"
+    graph_version_hash: str = "none"
+    graph_mode: str = "off"
 
 
 @dataclass(frozen=True, slots=True)

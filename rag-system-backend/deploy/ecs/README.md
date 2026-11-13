@@ -20,7 +20,8 @@ migrations/
 ├── rag_app/
 │   ├── V1.0.0__init_schema.sql
 │   ├── V1.0.0__stamp_existing_schema.sql
-│   └── V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+│   ├── V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+│   └── V1.1.0__to__V1.2.0__native_graphrag.sql
 └── rag_flow/
     └── V0.26.4__init_schema.sql
 deploy/
@@ -53,8 +54,9 @@ tests/ecs/
 和结构验收由 `database/` 配合完成。迁移只携带结构和版本标记，不含账号、模型或业务数据。
 数据库账号/权限阶段与应用发布阶段独立，普通 release 不运行迁移或注释 SQL。
 
-`rag_app.alembic_version` 保留原名称和历史头 `0006_document_version_updates`，避免破坏
-已有数据库。它现在是 SQL 发布版本表，运行期已不依赖 Alembic，不能手改版本伪造升级。
+`rag_app.alembic_version` 保留原名称。V1.0/V1.1 记录历史头
+`0006_document_version_updates`，V1.2 增量升级后记录 `0007_native_graphrag`。
+它现在是 SQL 发布版本表，运行期已不依赖 Alembic，不能手改版本伪造升级。
 原 Python 迁移历史保存在改造前 Git 检查点 `335d418ae86671a7617d21017d10feb8d323c22b`。
 
 ## 2. 运行拓扑和前置条件
@@ -110,19 +112,21 @@ ECS 不创建 Store、专用 Bucket 或共享服务权限，也不安装软件�
 | 2 | rag_app 与 rag_flow / 实例管理员 | 两库各执行 `02_database_permissions.pgadmin.sql`；只修改本系统库权限 |
 | 3 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__init_schema.sql`：仅全新空库，创建 13 张表及 V1.0.0 版本 |
 | 4 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__to__V1.1.0__shared_knowledge_bases.sql`：升级共享知识库结构，登记 V1.1.0 |
-| 5 | rag_flow / lazytt_rag | `migrations/rag_flow/V0.26.4__init_schema.sql`：仅全新空库，创建 42 张表及相关结构 |
-| 6 | 对应业务库 / lazytt_rag | `03_rag_app_comments.sql`、`03_rag_flow_comments.sql`：补充中文注释 |
-| 7 | 对应业务库 / lazytt_rag | `04_verify_rag_app.sql`、`04_verify_rag_flow.sql`：只读验收，返回 verified |
-| 8 | postgres / 实例管理员 | `05_verify_database_access.sql`：检查自身两库授权和其他业务库 CONNECT 隔离 |
+| 5 | rag_app / lazytt_rag | `migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql`：保留现有业务数据，新增图谱状态、GRAPH 类型与单在途任务约束，登记 V1.2.0 |
+| 6 | rag_flow / lazytt_rag | `migrations/rag_flow/V0.26.4__init_schema.sql`：仅全新空库，创建 42 张表及相关结构 |
+| 7 | 对应业务库 / lazytt_rag | `03_rag_app_comments.sql`、`03_rag_flow_comments.sql`：补充中文注释；图谱字段注释由 V1.2 增量 SQL 携带 |
+| 8 | 对应业务库 / lazytt_rag | `04_verify_rag_app.sql`、`04_verify_rag_flow.sql`：只读验收，返回 verified |
+| 9 | postgres / 实例管理员 | `05_verify_database_access.sql`：检查自身两库授权和其他业务库 CONNECT 隔离 |
 
-管理员连接业务库后，步骤 3～7 先 `SET ROLE lazytt_rag;`，完成后 `RESET ROLE;`。
+管理员连接业务库后，步骤 3～8 先 `SET ROLE lazytt_rag;`，完成后 `RESET ROLE;`。
 本系统按既有契约共用一个业务所有者 `lazytt_rag`，两库之间允许该身份访问；不得让它有
 SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS。跨其他库的 PUBLIC CONNECT
-若仍存在，第 8 步会报错；由管理员另行审阅共享 ACL，不由本脚本批量撤销其他系统权限。
+若仍存在，第 9 步会报错；由管理员另行审阅共享 ACL，不由本脚本批量撤销其他系统权限。
 
 已有库按实际版本分支执行：
 
-- 已是 V1.1.0：跳过初始化和增量迁移，复核结构、注释及权限。
+- 已是 V1.2.0：跳过初始化和增量迁移，复核结构、注释及权限。
+- 已是 V1.1.0：只执行 V1.1→V1.2 增量 SQL，允许保留现有知识库/文档数据；既有知识库图谱保持关闭。
 - 0006 完整旧结构、缺少全部发布元数据：只执行 `V1.0.0__stamp_existing_schema.sql`，
   之后按 V1.0.0 处理。不能给部分元数据、未知结构或 V1.1.0 重新盖章。
 - V1.0.0：升级脚本要求知识资源、Job、查询、反馈和幂等表为空。有旧业务数据时会拒绝，
@@ -183,11 +187,12 @@ GHCR 私有包需本次受限会话的有效登录。可临时设置 `DOCKER_CON
 ```bash
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__init_schema.sql
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
+"${candidate[@]}" --mode migrate --database rag_app --sql V1.1.0__to__V1.2.0__native_graphrag.sql
 "${candidate[@]}" --mode migrate --database rag_flow --sql V0.26.4__init_schema.sql
 ```
 
 这些命令只使用内存中的候选 Compose，保留已有运行 Compose，不启动常驻服务。注释与
-验收继续在 pgAdmin 使用上节步骤 6～8 完成，不另复制进应用镜像。
+验收继续在 pgAdmin 使用上节步骤 7～9 完成，不另复制进应用镜像。
 
 ## 6. 首次账号、模型与发布
 
@@ -247,6 +252,14 @@ sudo bash /opt/lazytt/lazytt-rag-system/administrator/58153ebc9caf/account.sh '<
 五个常驻服务均健康。应用仍为上文固定的 `58153ebc`，SSH 保活修复只改变发布控制。
 其他首次环境完成账号后，由部署执行人继续正式 `bootstrap-models`、关闭注册及同候选 release。
 模型调用、五个服务健康、业务和恢复验收分别记录，不能以账号成功代替部署完成。
+
+可选原生图谱默认关闭。需要启用时，在管理员私有环境中显式设置
+`RAGFLOW_GRAPH_ENABLED=true` 及独立的 `RAGFLOW_GRAPH_CHAT_BASE_URL`、
+`RAGFLOW_GRAPH_CHAT_API_KEY`、`RAGFLOW_GRAPH_CHAT_MODEL`，然后执行已有的
+`bootstrap-models` 步骤。它会进行标准 Chat Completions 合成关系探测并登记默认 Chat，
+产生模型调用费用；不会借用 Gateway 凭据。三元组仅通过 `--env` 变量名传给该次
+Bootstrap，普通发布只消费成功后写回的 `RAGFLOW_GRAPH_CHAT_MODEL_REF`。
+模型登记不等同于知识库已经构图，仍需通过管理接口启用并查看构建状态。
 
 本次运行验收：Gateway `19580` readiness 与 RAGFlow `19581` healthz 均为 200，
 缺失或空 Tenant/User Header 返回 `400 / RAG-COMMON-001`。空闲状态下重启五个服务后，

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
+import anyio
 from fastapi import Depends, FastAPI, Header, Path, Request, status
 from fastapi.responses import StreamingResponse
+from starlette.types import Send
 
 from rag_service.api.schemas import (
     AnswerData,
@@ -24,6 +27,7 @@ from rag_service.api.schemas import (
     CreateFeedbackRequest,
     FeedbackData,
     FeedbackResponse,
+    GraphRetrievalDiagnostics,
     QueryPlanData,
     RequestRecordData,
     RequestRecordResponse,
@@ -52,6 +56,37 @@ from rag_service.security.context import SecurityContext
 OnlineDependency = Callable[[], AsyncIterator[OnlineService]]
 AuthenticateDependency = Callable[..., Any]
 DisconnectCheck = Callable[[], Awaitable[bool]]
+_SSE_CLEANUP_TIMEOUT_SECONDS = 10.0
+logger = logging.getLogger(__name__)
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """确保真实 HTTP 断连后关闭响应生成器，而不是等待垃圾回收才取消模型。
+
+    Starlette 可能在发送某个已产出的帧时取消响应协程；此时生成器停在 ``yield``，
+    单靠生成器内部的 ``finally`` 不会立即执行。该响应屏蔽外层取消并有界收尾。
+    """
+
+    async def stream_response(self, send: Send) -> None:
+        """发送真实 SSE；无论正常结束、发送失败或取消，都同步等待迭代器关闭。"""
+        try:
+            await super().stream_response(send)
+        finally:
+            logger.debug("sse_response_cleanup_started")
+            try:
+                with anyio.move_on_after(_SSE_CLEANUP_TIMEOUT_SECONDS, shield=True) as cleanup:
+                    close = getattr(self.body_iterator, "aclose", None)
+                    if close is not None:
+                        await close()
+            except Exception as error:
+                logger.warning(
+                    "sse_response_cleanup_failed", extra={"error_type": type(error).__name__}
+                )
+                raise
+            if cleanup.cancel_called:
+                logger.warning("sse_response_cleanup_timeout")
+            else:
+                logger.debug("sse_response_cleanup_finished")
 
 
 def _request_id(request: Request) -> UUID:
@@ -111,6 +146,14 @@ def _retrieval(
         ],
         total=value.total,
         warnings=list(value.warnings),
+        graph_diagnostics=GraphRetrievalDiagnostics(
+            mode=value.graph_mode,
+            version_hash=value.graph_version_hash,
+            generations=value.graph_generations,
+            query_count=value.graph_query_count,
+            source_candidate_count=value.graph_source_candidate_count,
+            elapsed_ms=value.graph_elapsed_ms,
+        ),
     )
 
 
@@ -247,24 +290,61 @@ async def _stream_sse_events(
     request_id: UUID,
     heartbeat_seconds: float,
     disconnected: DisconnectCheck,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """将应用层事件流包装成可靠的 SSE 文本流。
 
-    函数给事件分配递增序号，在模型暂时无输出时发送心跳，并定期检查客户端是否
-    断开；结束或异常时关闭后台取数任务，避免连接消失后模型仍继续消耗资源。
+    一个持久生产协程负责完整迭代和关闭 Service，保证 deadline、审计及生成器上下文
+    始终属于同一 Task。单元素队列限制预取；HTTP 消费者只负责心跳、断连和帧编号。
+    结束时必须取消并等待生产者，不能留下脱离请求生命周期的模型任务。
     """
     sequence = 0
-    pending_next: asyncio.Task[StreamEvent] | None = None
+    accepted_sent = False
+    completed_sent = False
+    queue: asyncio.Queue[StreamEvent | Exception | None] = asyncio.Queue(maxsize=1)
+
+    async def produce() -> None:
+        """在同一 Task 内驱动并关闭整个答案流，通过有界队列传递事件、错误或结束。"""
+        logger.debug("sse_producer_started")
+        failure: Exception | None = None
+        try:
+            async for event in stream:
+                await queue.put(event)
+        except Exception as error:
+            failure = error
+        finally:
+            # 关闭也必须由拥有 deadline/生成器上下文的生产者执行；消费者不能跨 Task
+            # 调用 aclose，否则 accepted 后暂停的上下文可能无法正常退出和提交取消。
+            logger.debug("sse_source_cleanup_started")
+            try:
+                with anyio.move_on_after(_SSE_CLEANUP_TIMEOUT_SECONDS, shield=True) as cleanup:
+                    await stream.aclose()
+                if cleanup.cancel_called:
+                    logger.warning("sse_source_cleanup_timeout")
+                else:
+                    logger.debug("sse_source_cleanup_finished")
+            except Exception as error:
+                logger.warning(
+                    "sse_source_cleanup_failed", extra={"error_type": type(error).__name__}
+                )
+                failure = failure or error
+        # 取消通常会在 finally 后继续传播；若底层把取消转换成普通异常，也不能再向
+        # 已经没有消费者的满队列等待发送。该任务仍由 HTTP 收尾同步等待，不脱离请求。
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            return
+        await queue.put(failure)
+
+    producer = asyncio.create_task(produce(), name="rag-sse-producer")
     try:
-        pending_next = asyncio.create_task(anext(stream))
         while True:
-            completed, _ = await asyncio.wait(
-                {pending_next},
-                timeout=heartbeat_seconds,
-            )
-            if not completed:
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+            except TimeoutError:
                 if await disconnected():
                     return
+                # 首帧必须是业务 accepted；初始化较慢时仍检测断连，但不能抢先发心跳。
+                if not accepted_sent:
+                    continue
                 sequence += 1
                 yield stream_event_json(
                     request_id=request_id,
@@ -272,23 +352,25 @@ async def _stream_sse_events(
                     event=StreamEvent("heartbeat"),
                 )
                 continue
-
-            current = pending_next
-            pending_next = None
-            try:
-                event = current.result()
-            except StopAsyncIteration:
+            if message is None:
                 return
-
+            if isinstance(message, Exception):
+                raise message
             if await disconnected():
                 return
+            if message.event == "accepted":
+                accepted_sent = True
+            if message.event == "completed":
+                completed_sent = True
             sequence += 1
             yield stream_event_json(
                 request_id=request_id,
                 sequence=sequence,
-                event=event,
+                event=message,
             )
-            pending_next = asyncio.create_task(anext(stream))
+            # completed 是最后一帧；生产者的正常收尾交给 finally 有界等待，不再发心跳。
+            if completed_sent:
+                return
     except RagError as error:
         sequence += 1
         payload = {
@@ -305,11 +387,18 @@ async def _stream_sse_events(
             f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
         )
     finally:
-        if pending_next is not None:
-            pending_next.cancel()
-            with suppress(asyncio.CancelledError, StopAsyncIteration, RagError):
-                await pending_next
-        await stream.aclose()
+        # 未发终态就断连时先取消生产者；已发 completed 则让它正常结束。两者都屏蔽
+        # Starlette 的持续取消并有界等待完整收尾，不把 shield 包装的任务丢到后台。
+        logger.debug("sse_producer_cleanup_started")
+        with anyio.move_on_after(_SSE_CLEANUP_TIMEOUT_SECONDS, shield=True) as cleanup:
+            if not completed_sent and not producer.done():
+                producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
+        if cleanup.cancel_called:
+            logger.warning("sse_producer_cleanup_timeout")
+        else:
+            logger.debug("sse_producer_cleanup_finished")
 
 
 def install_online_routes(
@@ -405,15 +494,22 @@ def install_online_routes(
                 security,
                 _answer_input(body, request_id),
             )
-            async for event in _stream_sse_events(
+            frames = _stream_sse_events(
                 stream=stream,
                 request_id=request_id,
                 heartbeat_seconds=sse_heartbeat_seconds,
                 disconnected=request.is_disconnected,
-            ):
-                yield event
+            )
+            try:
+                async for event in frames:
+                    yield event
+            finally:
+                # 关闭最外层 events 不会自动向 async-for 的内部生成器传递 GeneratorExit。
+                # 显式逐层关闭，保证 accepted 刚发送就断连也能到达审计与模型收尾逻辑。
+                with anyio.move_on_after(_SSE_CLEANUP_TIMEOUT_SECONDS, shield=True):
+                    await frames.aclose()
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             events(),
             media_type="text/event-stream",
             headers={

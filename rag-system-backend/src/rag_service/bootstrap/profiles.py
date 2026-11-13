@@ -25,7 +25,7 @@ from rag_service.infrastructure.postgres.models import ConfigProfileRow
 from rag_service.settings import ProfileSection
 
 PROFILE_TYPES = frozenset(
-    {"PARSER", "CHUNK", "EMBEDDING", "RETRIEVAL", "RERANK", "PROMPT", "MODEL", "CACHE"}
+    {"PARSER", "CHUNK", "EMBEDDING", "RETRIEVAL", "RERANK", "PROMPT", "MODEL", "CACHE", "GRAPH"}
 )
 
 
@@ -325,6 +325,10 @@ def load_profile_seeds(settings: ProfileSection) -> tuple[ProfileSeed, ...]:
         elif filename == "prompts.example.yaml":
             prompt_file = PromptSeedFile.model_validate(raw)
             seeds.extend(_make_seed("PROMPT", item) for item in prompt_file.profiles)
+        elif filename == "graph_profiles.example.yaml":
+            # 独立新增策略文件，沿用既有不可变 checksum 导入，不修改已应用的 Parser。
+            graph_file = PromptSeedFile.model_validate(raw)
+            seeds.extend(_make_seed("GRAPH", item) for item in graph_file.profiles)
         else:
             raise ValueError(f"unrecognized profile seed file: {filename}")
 

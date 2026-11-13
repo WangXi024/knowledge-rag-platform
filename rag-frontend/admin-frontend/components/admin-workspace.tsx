@@ -39,6 +39,7 @@ import type {
 } from '@/lib/contracts';
 import { errorMessage, GatewayError, gatewayRequest } from '@/lib/gateway-api';
 import { DocumentChunks } from '@/components/document-chunks';
+import { KnowledgeGraphSettings } from '@/components/knowledge-graph-settings';
 
 export type AdminSection = 'overview' | 'knowledge' | 'documents';
 type Dialog = 'create' | 'edit' | 'upload' | 'reparse' | 'chunks' | null;
@@ -595,6 +596,14 @@ export function AdminWorkspace({
             onDelete={(item) => void deleteKnowledgeBase(item)}
             onCreate={() => setDialog('create')}
           />
+          {selectedKnowledgeBase && (
+            <KnowledgeGraphSettings
+              key={`${session.tenantId}:${session.userId}:${scope}:${selectedKnowledgeBase.id}`}
+              session={session}
+              knowledgeBase={selectedKnowledgeBase}
+              available={capabilities.features.native_graphrag === true}
+            />
+          )}
         </>
       )}
 

@@ -138,6 +138,14 @@ else
   case "$ragflow_vision_model" in
     ""|pending-model-bootstrap) echo "RAGFLOW_VISION_MODEL is unresolved" >&2; exit 1 ;;
   esac
+  # 图谱默认关闭；启用后必须先完成显式 Chat 登记，不能让 pending 引用启动应用。
+  graph_enabled="$(awk -F= '$1 == "RAGFLOW_GRAPH_ENABLED" { print $2 }' "$env_file")"
+  if [ "${graph_enabled:-false}" = "true" ]; then
+    graph_chat_ref="$(awk -F= '$1 == "RAGFLOW_GRAPH_CHAT_MODEL_REF" { print $2 }' "$env_file")"
+    case "$graph_chat_ref" in
+      ""|pending-*|change-me*) echo "RAGFLOW_GRAPH_CHAT_MODEL_REF is unresolved" >&2; exit 1 ;;
+    esac
+  fi
 fi
 
 cd "$repo_root"

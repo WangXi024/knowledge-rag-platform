@@ -2,7 +2,9 @@
 
 ## 1. 目的
 
-本文是 `RagflowAdapter` 的开发契约。只允许使用 RAGFlow v0.26.4 公开 HTTP API；禁止访问 RAGFlow PostgreSQL、Redis、对象存储和 Elasticsearch。
+本文是 `RagFlowAdapter` 与独立 `RagFlowGraphAdapter` 的开发契约。只允许通过
+RAGFlow v0.26.4 公开 HTTP API 接入业务能力；Adapter 不直接访问 RAGFlow
+PostgreSQL、Redis、对象存储或 Elasticsearch。
 
 官方基线：
 
@@ -17,8 +19,9 @@
 - 所有请求带 `Authorization: Bearer <RAGFLOW_API_KEY>`。
 - 成功必须同时满足 HTTP 2xx 与响应 `code == 0`；二进制接口除外。
 - RAGFlow 原始 ID 只保存在映射表和内部 DTO。
-- Adapter 的每个业务方法必须接收 `SecurityContext`，并通过当前
-  `security_scope_id` 查询本地映射后才能得到 RAGFlow Dataset/Document ID。
+- 普通引擎方法接收 `SecurityContext`；图谱方法显式接收资源 `security_scope_id`、
+  本地知识库 UUID 与图谱代数。两者均须按已授权 Scope 查询本地映射，才能得到
+  RAGFlow Dataset/Document ID。
   禁止提供只按 RAGFlow ID 或只按项目 UUID 访问下游的公开方法。
 - 对外错误使用稳定项目错误码，原始 message 只进入脱敏调试日志。
 - JSON 使用宽松读取未知字段、严格检查必要字段。
@@ -44,6 +47,12 @@
 | 列出 Chunk    | `GET /api/v1/datasets/{dataset_id}/documents/{document_id}/chunks` | 查询文档解析后产生的文本片段、页码、坐标等信息                      | 检查解析结果、验收切分质量、问题排查                      |
 | 切换 Chunk 可用性 | `PATCH /api/v1/datasets/{dataset_id}/documents/{document_id}/chunks` | 按 `chunk_ids` 批量设置 `available` | 文档版本发布、回滚和数据库失败补偿 |
 | 纯检索         | `POST /api/v1/retrieval`                                           | 根据问题，从一个或多个知识库中检索最相关的 Chunk，并返回内容、分数和位置信息    | RAG 问答的检索阶段；该接口本身不调用大模型生成答案             |
+| 图谱配置 | `GET /api/v1/datasets?id=...` 与 `PUT /api/v1/datasets/{dataset_id}` | 回读并合并受控 `parser_config.graphrag`，保留原有 Parser 配置 | 原生构图前应用不可变图谱策略；不直接改数据库 |
+| 原生构图/状态 | `POST/GET /api/v1/datasets/{dataset_id}/index?type=graph` | 提交及回读原生图谱任务 | 知识库级持久 Job 调度与恢复；提交受理不等于构图完成 |
+| 取消构图 | `DELETE /api/v1/datasets/{dataset_id}/index?type=graph&wipe=false` | 请求取消并保留已有图谱 | 只能报告受理；上游记录消失不能证明执行器已停止 |
+| 重建前清理旧图 | `DELETE /api/v1/datasets/{dataset_id}/index?type=graph&wipe=true` | 清除派生图产物和任务指针，保留普通文档与 Chunk | 仅在同一旧任务明确终态且本地互斥、恢复记录保护下使用；未知或运行任务不得清理 |
+| 读取图谱结构 | `GET /api/v1/datasets/{dataset_id}/graph` | 获取原生构图产生的节点和边 | 一期在线有界实体种子/一跳导航，随后同库回读原文 |
+| KG 聚合诊断 | `POST /api/v1/retrieval`，`use_kg=true` | 显式诊断官方 KG 检索 | 仅 `probe_kg_navigation` 使用，不进入一期在线问答 |
 
 ## 4. Dataset 映射
 
@@ -243,7 +252,8 @@ Reparse 使用 `delete=true`。取消 `run="2"`。调用方必须依据 Dataset 
 }
 ```
 
-第一阶段固定 `use_kg=false`、`toc_enhance=false`。不使用 `cross_languages`，除非评测确认。
+普通 Chunk 检索固定 `use_kg=false`、`toc_enhance=false`。一期图谱增强通过独立的
+官方图结构读取完成，不在这条请求上开启 KG 聚合。不使用 `cross_languages`，除非评测确认。
 
 ### 8.1 Metadata 操作符
 
@@ -286,6 +296,52 @@ RAGFlow Chunk 字段映射：
 脱敏安全事件。一次请求中的知识库 ID 在调用 RAGFlow 前必须全部通过当前 Scope
 校验；禁止“合法部分继续检索”的部分成功模式。
 
+### 8.3 原生图谱的结构导航与 KG 聚合限制
+
+本次 v0.26.4 隔离真实联调中，原生构图完成，官方 Graph Read 返回 **9 个节点、
+15 条边**。随后一次 `use_kg=true` 冷诊断耗时约 **71 秒**，HTTP 200 响应只含
+**2 个普通 Chunk**，没有 KG 聚合项。这是该次小型合成场景的观察结果，不代表
+一期整体或业务质量已验收，也不能用普通 Chunk 数量冒充图谱命中。
+
+对实际固定镜像只读核对发现两个相关缺陷：
+
+1. `rag/graphrag/search.py` 的同步候选方法调用
+   `rag/nlp/search.py` 中已为异步函数的 `Dealer.get_vector`，缺少 `await`；
+   `ESConnection.search` 不能将该协程识别为 `MatchDenseExpr`，因而缺失预期向量查询。
+2. `rag/utils/es_conn.py` 的 `get_fields` 未回读命中顶层 `_score`，而 KG 实体/关系
+   转换依赖该分数并按默认 `0.3` 阈值筛选；缺失分数按 `0` 处理，候选会被过滤。
+
+公开路由只有在聚合正文非空时插入该项。KG Query Rewrite 的 JSON/调用异常还可能
+被上游捕获并退回原问题，因此 HTTP 成功不能证明聚合成功。实体类型池由上游内部
+读取，客户端不需要为图谱请求另传 `entity_types`。Query Rewrite 有精确提示词缓存，
+不等于整条 KG 检索缓存；模型名、问题或类型池样本及顺序改变都可能未命中。
+
+在不修改/Fork 上游、不改变模型或 Token 参数的约束下，一期在线采用明确版本化的
+`native_graph_read_v1`：先检查知识库 Scope、READY/内容代数与全部活动物理来源，
+再调用官方 Graph Read，流式正文上限为 **4 MiB**。该版本上游已截取最多 **256 个
+节点、128 条边**，没有完整数量或截断标记；客户端因此拒绝节点数 **≥256** 或边数
+**≥128**，只接受最多 **255 个节点、127 条边**且结构校验通过的响应。按完整实体词
+匹配问题种子，扩展一跳邻居，所得实体名用于同库普通原文补召回。空图、无种子、
+结构无效或超限时降级；达到上游截取阈值的响应也不当作完整导航结果。
+
+在线路线 `ragflow:graph` 同时返回 `native_graph_structural_navigation`，并在
+`graph_diagnostics.mode` 声明 `native_graph_read_v1`。该模式进入精确/语义缓存边界，
+与旧 `native` 聚合导航答案隔离。它表示使用原生构图产物，不表示官方 `use_kg`
+聚合实现已经修复。图谱描述、关系描述和社区摘要均不成为可引用正文，最终证据仍须
+映射当前活动文档并回读真实 Chunk；范围或来源无法核验时不返回图谱证据。
+
+`probe_kg_navigation` 只保留为显式的官方 KG 诊断能力，在线问答不调用它。原生构图
+仍需要实际可用的 Graph Chat，部署与知识库的图谱能力默认关闭。完整操作边界见
+[原生 GraphRAG 接入说明](../../docs/NATIVE_GRAPHRAG.md#5-检索来源与缓存边界)。
+
+删除原文后直接重建可能复用上游旧子图，保留已删除来源；实际联调已观察到该问题，
+来源边界必须拒绝该图。公开 `wipe=true` 可清理 graph/subgraph/entity/relation/
+community_report 和两个 KB 阶段完成标记，保留普通原文、Chunk 与通用模型缓存；
+独立 Redis 阶段 checkpoint 和 `ty2ents` 不在清理范围。当前 light 策略关闭 resolution/
+community 阶段。该接口没有任务身份条件或图谱锁，并会清空当前任务指针，因此只能
+在同一旧任务明确终态后、受本地互斥与持久恢复记录保护的重建准备阶段清理；不能把
+记录缺失视为终态，不能清理未知或运行任务，也不能把清理标记当作 POST 构图提交标记。
+
 ## 9. 健康与能力探测
 
 启动 Ready 流程：
@@ -311,7 +367,7 @@ Health 通过不代表 Retrieval 可用；上线 Smoke 还必须对专用小知�
 
 ## 11. 契约测试
 
-`RagEnginePort` 的方法必须与第 3 节接口矩阵一一对应，至少包括：
+`RagEnginePort` 的方法必须覆盖第 3 节普通引擎能力，至少包括：
 
 ```text
 create/get/update/delete_dataset
@@ -321,6 +377,10 @@ list_chunks
 retrieve
 health
 ```
+
+图谱能力由独立 `GraphPort` 承担，覆盖配置、原生构建、状态、取消、结构快照和
+有界导航；KG 聚合诊断与在线结构导航必须分开验收。应验证结构上限、完整实体种子、
+一跳扩展、过滤旁路、缓存模式隔离、来源重验与无匹配降级，不能只断言 HTTP 200。
 
 不得因为某个方法当前只被补偿流程调用就留给 Adapter 自由发挥。必须测试：
 成功、资源不存在、请求无效、RAGFlow `code != 0`、HTTP 非 2xx、未知字段、

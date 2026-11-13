@@ -1300,7 +1300,11 @@ class SqlAlchemyJobRepository:
                     IngestionJobRow.security_scope_id == security_scope_id,
                     IngestionJobRow.id == value.id,
                     IngestionJobRow.status.in_(
-                        ["PENDING", "RETRY_WAIT"] if pending else ["RUNNING", "CANCEL_REQUESTED"]
+                        ["PENDING", "RETRY_WAIT"] if pending else (
+                            ["PENDING", "RETRY_WAIT", "RUNNING", "CANCEL_REQUESTED"]
+                            if value.job_type == JobType.GRAPH_BUILD
+                            else ["RUNNING", "CANCEL_REQUESTED"]
+                        )
                     ),
                 ).values(**fields)
             )
@@ -1447,6 +1451,12 @@ class SqlAlchemyJobRepository:
             IngestionJobRow.status == JobStatus.RUNNING.value,
             IngestionJobRow.locked_until < now,
         )
+        # 图谱排队取消也需要Worker确认；崩溃后的取消不能因状态不是RUNNING而遗失。
+        graph_cancellation = and_(
+            IngestionJobRow.job_type == JobType.GRAPH_BUILD.value,
+            IngestionJobRow.status == JobStatus.CANCEL_REQUESTED.value,
+            or_(IngestionJobRow.locked_until.is_(None), IngestionJobRow.locked_until < now),
+        )
         row = await self._session.scalar(
             select(IngestionJobRow)
             .where(
@@ -1456,6 +1466,7 @@ class SqlAlchemyJobRepository:
                         retryable_status,
                     ),
                     expired_running,
+                    graph_cancellation,
                 ),
             )
             .order_by(IngestionJobRow.created_at, IngestionJobRow.id)
@@ -1464,8 +1475,11 @@ class SqlAlchemyJobRepository:
         )
         if row is None:
             return None
-        recovering_expired_run = row.status == JobStatus.RUNNING.value
-        row.status = JobStatus.RUNNING.value
+        recovering_expired_run = row.status in {
+            JobStatus.RUNNING.value, JobStatus.CANCEL_REQUESTED.value,
+        }
+        if row.status != JobStatus.CANCEL_REQUESTED.value:
+            row.status = JobStatus.RUNNING.value
         if not recovering_expired_run:
             row.attempt += 1
         row.locked_by = worker_id

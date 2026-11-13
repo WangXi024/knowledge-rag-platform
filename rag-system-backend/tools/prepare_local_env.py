@@ -89,7 +89,13 @@ FULL_ENV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "RAGFLOW_EMBEDDING_MODEL",
             "RAGFLOW_VISION_RUNTIME_MODEL",
             "RAGFLOW_VISION_MODEL",
+            "RAGFLOW_GRAPH_CHAT_MODEL_REF",
         ),
+    ),
+    (
+        "RAGFlow 原生图谱（仅模型 Bootstrap 读取三元组）",
+        ("RAGFLOW_GRAPH_ENABLED", "RAGFLOW_GRAPH_CHAT_BASE_URL",
+         "RAGFLOW_GRAPH_CHAT_API_KEY", "RAGFLOW_GRAPH_CHAT_MODEL"),
     ),
     (
         "Chat 与 Query Rewrite",
@@ -391,6 +397,12 @@ def main() -> None:
         "VISION_BASE_URL": _required(source_values, "VISION_BASE_URL"),
         "VISION_API_KEY": _required(source_values, "VISION_API_KEY"),
         "VISION_MODEL": _required(source_values, "VISION_MODEL"),
+        # 图谱关闭时不增加启动要求。开启时要求用户显式填写独立三元组，不复用
+        # Gateway 的默认值；这些值仅交给模型登记工具，普通 Compose 不会注入。
+        "RAGFLOW_GRAPH_ENABLED": _boolean(source_values, "RAGFLOW_GRAPH_ENABLED", default="false"),
+        "RAGFLOW_GRAPH_CHAT_BASE_URL": source_values.get("RAGFLOW_GRAPH_CHAT_BASE_URL", ""),
+        "RAGFLOW_GRAPH_CHAT_API_KEY": source_values.get("RAGFLOW_GRAPH_CHAT_API_KEY", ""),
+        "RAGFLOW_GRAPH_CHAT_MODEL": source_values.get("RAGFLOW_GRAPH_CHAT_MODEL", ""),
         # 视频抽帧模型与文档 OCR 必须显式配置。即使两项能力共用供应商和 Key，也由
         # 用户在私有环境中明确填写，生成器不会复制或推断任何凭据。
         "MEDIA_VISION_BASE_URL": source_values.get("MEDIA_VISION_BASE_URL", ""),
@@ -439,6 +451,7 @@ def main() -> None:
         "RAGFLOW_EMBEDDING_MODEL",
         "RAGFLOW_VISION_RUNTIME_MODEL",
         "RAGFLOW_VISION_MODEL",
+        "RAGFLOW_GRAPH_CHAT_MODEL_REF",
         "RAGFLOW_SMOKE_EMBEDDING_BASE_URL",
     )
     for name in copied_names:
@@ -504,6 +517,12 @@ def main() -> None:
     _required(values, "LLM_API_KEY")
     _required(values, "EMBEDDING_API_KEY")
     _required(values, "VISION_API_KEY")
+    _require_capability(
+        values,
+        enabled_name="RAGFLOW_GRAPH_ENABLED",
+        field_names=("RAGFLOW_GRAPH_CHAT_BASE_URL", "RAGFLOW_GRAPH_CHAT_API_KEY",
+                     "RAGFLOW_GRAPH_CHAT_MODEL"),
+    )
     _require_capability(
         values,
         enabled_name="MEDIA_PROCESSING_ENABLED",

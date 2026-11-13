@@ -7,11 +7,14 @@ import logging
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+from rag_service.application.graph import GraphService
+from rag_service.application.graph_worker import GraphWorker
 from rag_service.application.ingestion_worker import IngestionWorker
 from rag_service.application.profiles import ProfileCatalog
-from rag_service.domain.models import utc_now
+from rag_service.domain.models import JobType, utc_now
 from rag_service.infrastructure.media.openai_compatible import OpenAICompatibleMediaProcessor
 from rag_service.infrastructure.models.openai_compatible import OpenAICompatibleEmbeddingAdapter
+from rag_service.infrastructure.postgres.graph_repository import SqlAlchemyGraphRepository
 from rag_service.infrastructure.postgres.repositories import (
     SqlAlchemyDocumentRepository,
     SqlAlchemyDocumentVersionRepository,
@@ -22,6 +25,7 @@ from rag_service.infrastructure.postgres.repositories import (
 )
 from rag_service.infrastructure.postgres.session import create_engine, create_session_factory
 from rag_service.infrastructure.ragflow.adapter import RagFlowAdapter
+from rag_service.infrastructure.ragflow.graph_adapter import RagFlowGraphAdapter
 from rag_service.infrastructure.staging.filesystem import FileSystemUploadStaging
 from rag_service.settings import ServiceSettings
 from rag_service.workers.dispatch import PENDING_WAKEUPS, notify_committed, notify_workers
@@ -59,15 +63,17 @@ async def _renew_lease_until_stopped(
                     security_scope_id,
                     job_id,
                     worker_id=worker_id,
-                    locked_until=utc_now()
-                    + timedelta(seconds=settings.jobs.lease_seconds),
+                    locked_until=utc_now() + timedelta(seconds=settings.jobs.lease_seconds),
                 )
             if not renewed:
                 # 终态可能刚刚提交，这是正常收尾；否则立即取消旧执行协程。
                 async with factory() as session:
                     current = await SqlAlchemyJobRepository(session).get(security_scope_id, job_id)
                 if current is not None and current.status.value in {
-                    "SUCCEEDED", "FAILED", "CANCELLED", "RETRY_WAIT",
+                    "SUCCEEDED",
+                    "FAILED",
+                    "CANCELLED",
+                    "RETRY_WAIT",
                 }:
                     return
                 logger.warning("ingestion_job_lease_lost job_id=%s", job_id)
@@ -123,7 +129,8 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                 index_nodes = SqlAlchemyIndexNodeRepository(session)
                 entity_graph = SqlAlchemyEntityGraphRepository(session)
                 jobs = SqlAlchemyJobRepository(
-                    session, worker_id=worker_id,
+                    session,
+                    worker_id=worker_id,
                     owned_job=(claimed.security_scope_id, claimed.id),
                 )
 
@@ -162,27 +169,50 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                 # 文档级 Parser/Chunk 版本与 API 接受上传时的事实来源一致。目录只含
                 # 非敏感策略参数，可安全跨整个单任务生命周期复用。
                 profiles = await ProfileCatalog.from_database(session, settings.profiles)
+                graphs = SqlAlchemyGraphRepository(session)
+                graph_service = GraphService(
+                    knowledge_bases,
+                    graphs,
+                    jobs,
+                    enabled=settings.ragflow.graph_enabled,
+                    model_ref=settings.ragflow.graph_chat_model,
+                    profiles=profiles,
+                )
+                native_graph = RagFlowGraphAdapter(settings.ragflow, knowledge_bases, documents)
                 try:
-                    await IngestionWorker(
-                        documents,
-                        jobs,
-                        staging,
-                        rag_engine,
-                        knowledge_bases,
-                        settings.jobs,
-                        checkpoint=checkpoint,
-                        rollback=rollback,
-                        index_nodes=index_nodes,
-                        entity_graph=entity_graph,
-                        embedding=embedding,
-                        media_processor=media_processor,
-                        profiles=profiles,
-                        versions=versions,
-                    ).execute(
-                        claimed.security_scope_id,
-                        claimed.id,
-                        worker_id=worker_id,
-                    )
+                    if claimed.job_type == JobType.GRAPH_BUILD:
+                        await GraphWorker(
+                            knowledge_bases,
+                            graphs,
+                            jobs,
+                            native_graph,
+                            graph_service,
+                            checkpoint=checkpoint,
+                            rollback=rollback,
+                        ).execute(claimed)
+                    else:
+                        await IngestionWorker(
+                            documents,
+                            jobs,
+                            staging,
+                            rag_engine,
+                            knowledge_bases,
+                            settings.jobs,
+                            checkpoint=checkpoint,
+                            rollback=rollback,
+                            index_nodes=index_nodes,
+                            entity_graph=entity_graph,
+                            embedding=embedding,
+                            media_processor=media_processor,
+                            profiles=profiles,
+                            versions=versions,
+                            graph_service=graph_service,
+                            graphs=graphs,
+                        ).execute(
+                            claimed.security_scope_id,
+                            claimed.id,
+                            worker_id=worker_id,
+                        )
                 except Exception as exc:
                     failure = exc
                     await rollback()
@@ -191,6 +221,7 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                         await media_processor.close()
                     await embedding.close()
                     await rag_engine.close()
+                    await native_graph.close()
         finally:
             stop_heartbeat.set()
             await heartbeat

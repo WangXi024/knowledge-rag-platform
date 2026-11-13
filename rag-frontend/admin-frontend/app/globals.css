@@ -276,6 +276,34 @@ button { cursor: pointer; }
 .inline-progress { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 10px 12px; color: #3b6c60; border-radius: 8px; background: #eef8f5; font-size: 11px; }
 .warning-box { margin-bottom: 17px; padding: 11px 12px; color: #765d31; border: 1px solid #ecdfc2; border-radius: 9px; background: #fff9eb; font-size: 11px; line-height: 1.5; }
 
+/* 图谱一期只展示配置与真实任务状态，窄屏按单列保留完整诊断和操作按钮。 */
+.graph-settings { margin-top: 24px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: white; }
+.graph-settings > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+.graph-eyebrow { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: .75rem; font-weight: 750; }
+.graph-settings h2 { margin: 7px 0 0; font-size: 1.125rem; overflow-wrap: anywhere; }
+.graph-description, .graph-note { color: #60736d; font-size: .875rem; line-height: 1.65; }
+.graph-note { padding: 10px 12px; border-radius: 8px; background: #f3f8f5; }
+.graph-summary { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin: 20px 0; color: #60736d; font-size: .875rem; }
+.graph-status { padding: 5px 10px; color: #4b635a; border-radius: 7px; background: #edf2ef; }
+.graph-status-ready { color: #157454; background: #e9f7ef; }
+.graph-status-failed { color: var(--danger); background: #fff0ec; }
+.graph-status-stale, .graph-status-cancelling { color: #89642b; background: #fff6e5; }
+.graph-settings fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin: 0; padding: 0; border: 0; }
+.graph-settings legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.graph-settings fieldset label { display: flex; gap: 10px; align-items: flex-start; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.graph-settings input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--green); }
+.graph-settings label strong, .graph-settings label small { display: block; font-size: .875rem; }
+.graph-settings label small { margin-top: 5px; color: #72857c; font-size: .75rem; line-height: 1.5; }
+.graph-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
+.graph-actions > span { color: #89642b; font-size: .75rem; }
+.graph-settings button:disabled { cursor: not-allowed; opacity: .5; }
+.graph-error { padding: 12px; color: var(--danger); border: 1px solid #ebc9c4; border-radius: 8px; background: #fff5f3; font-size: .875rem; overflow-wrap: anywhere; }
+.graph-diagnostics { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); color: #60736d; font-size: .75rem; }
+.graph-diagnostics summary { cursor: pointer; }
+.graph-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 0; }
+.graph-diagnostics dt { font-weight: 700; }
+.graph-diagnostics dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+
 @media (max-width: 1040px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .login-page { grid-template-columns: 42% 1fr; }

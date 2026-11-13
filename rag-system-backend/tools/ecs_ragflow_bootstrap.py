@@ -43,6 +43,8 @@ def main() -> None:
             "RAGFLOW_EMBEDDING_MODEL": contract.embedding_ref,
             "RAGFLOW_VISION_MODEL": contract.vision_ref,
             "RAGFLOW_VISION_RUNTIME_MODEL": contract.vision_model,
+            # 业务运行时只获得已登记的引用，不接收图谱 Chat 的真实 Key 或 URL。
+            "RAGFLOW_GRAPH_CHAT_MODEL_REF": contract.graph_chat_ref,
             "LLM_OMIT_SAMPLING_PARAMETERS": str(compatibility.omit_sampling_parameters).lower(),
             "LLM_MAX_OUTPUT_TOKENS_FIELD": compatibility.max_output_tokens_field,
             "LLM_EXTRA_BODY_JSON": json.dumps(compatibility.normalized_extra_body()),

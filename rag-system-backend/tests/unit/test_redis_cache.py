@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -181,6 +183,9 @@ async def test_semantic_query_has_all_mandatory_filters_and_rejects_other_scope(
         "model_profile",
         "language",
         "history_hash",
+        "filter_hash",
+        "graph_version_hash",
+        "graph_mode",
         "normalized_question",
         "answer_json",
         "citations_json",
@@ -201,9 +206,109 @@ async def test_semantic_query_has_all_mandatory_filters_and_rejects_other_scope(
         "model_profile",
         "language",
         "history_hash",
+        "filter_hash",
+        "graph_version_hash",
+        "graph_mode",
         "expires_at_ms",
     ):
         assert f"@{field}:" in query
+
+
+def _semantic_search_result(stored: dict[str, Any]) -> list[Any]:
+    """把一个缓存 Hash 模拟成检索命中，允许测试伪造越界或旧格式的下游响应。
+
+    这里只排除体积大的向量；保留字段原值，以验证适配器会重新核验边界，不能只相信
+    Redis 已经执行了 TAG 过滤。不会访问真实 Redis 或业务文件。
+    """
+    fields: list[Any] = []
+    for name, value in stored.items():
+        if name != "embedding":
+            fields.extend((name, value))
+    fields.extend(("vector_distance", "0.01"))
+    return [1, "synthetic-cache-key", fields]
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [("filter_hash", "d" * 64), ("graph_version_hash", "e" * 64), ("graph_mode", "native")],
+)
+@pytest.mark.asyncio
+async def test_filter_and_graph_boundaries_isolate_exact_and_semantic_answers(
+    service_settings: ServiceSettings,
+    field: str,
+    changed: str,
+) -> None:
+    """相同问题只要过滤范围、图谱版本或模式变化，两级缓存均不得返回旧答案。
+
+    语义结果刻意返回旧边界的高相似度记录，验证协议层仍会拒绝不符边界，防止错误
+    索引或旧记录绕过过滤。精确缓存则必须使用不同键，避免覆盖同问题的另一份答案。
+    """
+    redis = FakeRedis()
+    adapter = RedisAnswerCache(redis, FakeEmbedding(1024), service_settings.cache)
+    original = _entry(_boundary())
+    different_boundary = replace(original.boundary, **{field: changed})
+
+    assert cache_id(different_boundary, original.normalized_question) != original.cache_id
+    await adapter.put(original)
+    stored = redis.hashes[f"{service_settings.cache.semantic.key_prefix}{original.cache_id}"]
+    redis.search_result = _semantic_search_result(stored)
+
+    assert await adapter.get_exact(different_boundary, original.normalized_question) is None
+    assert await adapter.get_semantic(different_boundary, "近似但范围不同的问题") == ()
+
+
+@pytest.mark.asyncio
+async def test_extended_cache_boundary_roundtrips_in_both_storage_formats(
+    service_settings: ServiceSettings,
+) -> None:
+    """非默认过滤摘要、图版本和模式能在 JSON 与 Hash 两种格式中完整往返。"""
+    redis = FakeRedis()
+    adapter = RedisAnswerCache(redis, FakeEmbedding(1024), service_settings.cache)
+    boundary = replace(
+        _boundary(), filter_hash="d" * 64, graph_version_hash="e" * 64, graph_mode="native"
+    )
+    value = _entry(boundary)
+    await adapter.put(value)
+    stored = redis.hashes[f"{service_settings.cache.semantic.key_prefix}{value.cache_id}"]
+    redis.search_result = _semantic_search_result(stored)
+
+    exact = await adapter.get_exact(boundary, value.normalized_question)
+    semantic = await adapter.get_semantic(boundary, "相似问题")
+
+    assert exact is not None and exact.boundary == boundary
+    assert len(semantic) == 1 and semantic[0].boundary == boundary
+    for field in ("filter_hash", "graph_version_hash", "graph_mode"):
+        assert stored[field] == getattr(boundary, field)
+    command = redis.commands[-1]
+    for field in ("filter_hash", "graph_version_hash", "graph_mode"):
+        assert field in command[command.index("RETURN") + 2 : command.index("DIALECT")]
+
+
+@pytest.mark.parametrize("missing_field", ["filter_hash", "graph_version_hash", "graph_mode"])
+@pytest.mark.asyncio
+async def test_legacy_cache_without_complete_extended_boundary_is_a_safe_miss(
+    service_settings: ServiceSettings,
+    missing_field: str,
+) -> None:
+    """旧缓存没有过滤/图谱边界时安全未命中，不为缺失值补默认后误认成当前答案。
+
+    即使旧 JSON 被错误放在新键下，或旧 Hash 被搜索服务意外返回，也应逐条失效，
+    不导致本次问题报错；测试只在内存中删除合成字段。
+    """
+    redis = FakeRedis()
+    adapter = RedisAnswerCache(redis, FakeEmbedding(1024), service_settings.cache)
+    value = _entry(_boundary())
+    await adapter.put(value)
+    exact_key = f"{service_settings.cache.key_prefix}:exact:{value.cache_id}"
+    payload = json.loads(redis.values[exact_key])
+    del payload["boundary"][missing_field]
+    redis.values[exact_key] = json.dumps(payload)
+    stored = dict(redis.hashes[f"{service_settings.cache.semantic.key_prefix}{value.cache_id}"])
+    del stored[missing_field]
+    redis.search_result = _semantic_search_result(stored)
+
+    assert await adapter.get_exact(value.boundary, value.normalized_question) is None
+    assert await adapter.get_semantic(value.boundary, "旧格式的相似问题") == ()
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,18 @@ operations:
     success: ragflow-retrieval-response.json
     failure_cases: [empty_result, malformed_positions, unmapped_document]
 
+# 真实官方镜像的合成响应另存于后端测试目录；模型/账号密钥及内部地址均已剔除。
+graph_operations:
+  captured_fixture: ../../tests/fixtures/ragflow-v0.26.4-native-graph.json
+  # 仅记录合成 API-only 受理；executor 未运行，空任务不等于执行终止确认。
+  captured_cancellation_fixture: ../../tests/fixtures/ragflow-v0.26.4-native-cancellation.json
+  build: [single_submission, response_unknown_no_retry]
+  progress: [ready, invalid_progress, replaced_task]
+  graph_read: [bounded_complete_graph, active_sources_only, oversized_body, invalid_structure]
+  navigate: [exact_entity_seed, one_hop_only, no_seed_empty, no_generated_quotes]
+  kg_diagnostic: [ordinary_chunks_are_not_graph_hit, empty_aggregate]
+  cancel: [wipe_false, missing_task_is_not_stop_confirmation]
+
 transport_cases:
   - http_400
   - http_401

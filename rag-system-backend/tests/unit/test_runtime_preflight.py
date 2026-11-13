@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import httpx
 import pytest
 
@@ -113,8 +115,9 @@ async def test_runtime_preflight_validates_enabled_media_asr(
                         asr_api_key="synthetic-key",
                         asr_model="synthetic-asr-model",
                         # 单元测试只验证可执行文件发现，不真正运行这两个命令。
-                        ffmpeg_binary="true",
-                        ffprobe_binary="true",
+                        # 此单测不执行编解码，只验证存在性；Python路径跨平台可用。
+                        ffmpeg_binary=sys.executable,
+                        ffprobe_binary=sys.executable,
                     ),
                     # 媒体视觉与文档 OCR 使用不同模型，防止测试因复用同一 Client
                     # 和模型名而漏掉配置接线错误。

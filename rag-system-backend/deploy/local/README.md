@@ -14,7 +14,7 @@
 运行命令仍从仓库根目录执行；已有本地项目名、网络名和数据卷名沿用。
 本地完整一键流程会调用真实模型 API，通常产生探测调用；当前改造的自动测试未运行真实业务栈。
 
-本地 Schema 自动准备支持空库、完整旧 0006、V1.0.0、V1.1.0。早于 0006 或部分结构会
+本地 Schema 自动准备支持空库、完整旧 0006、V1.0.0、V1.1.0、V1.2.0。早于 0006 或部分结构会
 停止；V1.0.0 存在旧业务数据时升级拒绝且保留数据。外部库先按
 [当前数据库流程](../ecs/README.md#4-数据库执行顺序)准备，再启动本地客户端运行时。
 
@@ -32,7 +32,7 @@
 2. 生成 Git 忽略的 `deploy/local/.env.full`；
 3. 静态检查运行时 Compose、平台、端口、模型字段和数据卷；`local` 模式还会检查
    storage Compose，`external` 模式不读取本地存储镜像；
-4. `local` 模式先启动独立存储栈，幂等初始化/升级 App Schema 到 V1.1.0；
+4. `local` 模式先启动独立存储栈，幂等初始化/升级 App Schema 到 V1.2.0；
    `external` 模式只使用外部地址，不执行项目的本地迁移命令；
 5. 通过 RAGFlow 官方账号 API 注册/登录管理员并创建稳定 API Key；
 6. 真实探测配置的 Chat、Embedding、文档 Vision 和媒体 Vision 服务，自动识别 Embedding 维度及
@@ -204,7 +204,8 @@ RAG_STORAGE_MODE=local
 随后重新运行 `start-full.sh` 即可；业务代码、镜像和 RAGFlow 源码都不修改。
 
 `local` 启动会先识别 App 数据库状态：空库执行现有 0001～0006，合法旧 Revision 升级
-后登记 `V1.0.0` 并执行 V1.1.0 共享知识库增量 SQL，已经升级的库直接跳过。旧业务
+后登记 `V1.0.0`，再依次执行 V1.1.0 共享知识库和 V1.2.0 图谱状态增量 SQL，已经升级的库
+直接跳过。V1.1→V1.2 保留既有业务数据，不自动启用图谱。旧业务
 数据未按批准流程清空，或表集合、Revision、发布字段互相矛盾时脚本
 会停止并保留现有数据，绝不通过删除 Volume 重建。最终仍运行相同的只读 Schema 门禁。
 
@@ -431,3 +432,16 @@ Worker 在上传 RAGFlow 前把静态图片无损包装为单页 PDF，不缩放
 重新构建本地应用镜像并运行 `bootstrap all` 导入新策略后，重建 Gateway/Worker/Scheduler
 使其读取新配置；使用正常 `./deploy/local/start-full.sh` 也会完成这些步骤。
 已有图片切换到该策略需要重新上传；已使用该策略的图片可以正常重解析。
+
+### 原生 GraphRAG 的模型准备
+
+图谱能力默认关闭。启用时在 Git 忽略的 `deploy/local/.env.ragflow` 中设置
+`RAGFLOW_GRAPH_ENABLED=true`，并显式填写 `RAGFLOW_GRAPH_CHAT_BASE_URL`、
+`RAGFLOW_GRAPH_CHAT_API_KEY`、`RAGFLOW_GRAPH_CHAT_MODEL`。即使与 Gateway 使用同一模型，
+也需要分别填写；生成器不会复制凭据。保持关闭时无需添加任何模型配置。
+
+下次按正常 `start-full.sh` 流程执行时，宿主机模型 Bootstrap 会用合成关系实际调用
+标准 Chat Completions，登记 RAGFlow 独立 Chat 实例并设置租户默认 `llm_id`。
+探测会产生模型调用费用；供应商必须支持该标准协议。成功后自动写回非敏感的
+`RAGFLOW_GRAPH_CHAT_MODEL_REF`，业务容器只接收此引用和图谱开关，不接收图谱三元组。
+模型登记成功只说明模型可用，知识库的启用与构建状态以管理接口为准。

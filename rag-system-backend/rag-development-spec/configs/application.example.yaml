@@ -52,6 +52,9 @@ ragflow:
   vision_runtime_model_env: RAGFLOW_VISION_RUNTIME_MODEL
   embedding_dimension_env: EMBEDDING_DIMENSION
   contract_version: v0.26.4
+  # 只有完成独立图谱 Chat 模型注册后才开启；业务进程不读取其 URL 或密钥。
+  graph_enabled_env: RAGFLOW_GRAPH_ENABLED
+  graph_chat_model_env: RAGFLOW_GRAPH_CHAT_MODEL_REF
   connect_timeout_seconds: 3
   read_timeout_seconds: 30
   upload_timeout_seconds: 300
@@ -208,6 +211,7 @@ profiles:
     - retrieval_profiles.example.yaml
     - model_profiles.example.yaml
     - prompts.example.yaml
+    - graph_profiles.example.yaml
   import_on_bootstrap: true
   runtime_source: database
   conflict_policy: fail
@@ -256,10 +260,11 @@ cache:
   bypass_on_error: true
   semantic:
     # 不同模型或修订不能写入同一语义缓存索引。即使维度相同，也必须升级索引
-    # 世代，防止跨模型的相似度分布失真。
-    key_prefix: "rag-cache:semantic:v2:"
-    index_name: rag_semantic_cache_v2
-    index_schema_version: 2
+    # 世代，防止跨模型的相似度分布失真。v3 增加 Metadata 过滤摘要和图谱版本/模式
+    # TAG；首次部署创建独立索引，既有 v1/v2 索引保持原样并由旧键自然过期。
+    key_prefix: "rag-cache:semantic:v3:"
+    index_name: rag_semantic_cache_v3
+    index_schema_version: 3
     vector_field: embedding
     vector_data_type: FLOAT32
     embedding_model_env: EMBEDDING_MODEL

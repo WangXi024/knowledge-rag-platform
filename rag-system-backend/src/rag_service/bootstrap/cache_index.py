@@ -10,6 +10,19 @@ from redis.exceptions import ResponseError
 from rag_service.domain.errors import CacheIndexMismatchError
 from rag_service.settings import SemanticCacheSection
 
+_CACHE_BOUNDARY_TAG_FIELDS = (
+    "security_scope_id",
+    "knowledge_base_revisions_hash",
+    "retrieval_profile",
+    "prompt_profile",
+    "model_profile",
+    "language",
+    "history_hash",
+    "filter_hash",
+    "graph_version_hash",
+    "graph_mode",
+)
+
 
 class RedisCommandClient(Protocol):
     """Bootstrap 所需的最小 Redis 原生命令接口。"""
@@ -112,7 +125,11 @@ class RedisSemanticIndexBootstrap:
         )
 
     async def _create(self) -> None:
-        """创建 HASH 上的字段化 HNSW 向量索引和全部缓存边界 TAG 字段。"""
+        """创建新前缀的 HNSW 索引，声明包括过滤和图谱维度在内的全部边界 TAG。
+
+        仅在配置的索引不存在时调用；不会对旧索引发送 ALTER/DROP，也不会混写已有
+        模型或旧边界的 Hash。名字和前缀应由新 Schema 世代配置共同升级。
+        """
         s = self._settings
         await self._client.execute_command(
             "FT.CREATE",
@@ -138,6 +155,12 @@ class RedisSemanticIndexBootstrap:
             "language",
             "TAG",
             "history_hash",
+            "TAG",
+            "filter_hash",
+            "TAG",
+            "graph_version_hash",
+            "TAG",
+            "graph_mode",
             "TAG",
             "created_at_ms",
             "NUMERIC",
@@ -180,7 +203,11 @@ class RedisSemanticIndexBootstrap:
         )
 
     def _validate(self, info: dict[str, Any]) -> None:
-        """逐项对比 FT.INFO 的 Prefix 与向量字段参数。"""
+        """只读核验 Prefix、向量参数及全部边界 TAG，拒绝会丢失过滤语义的旧结构。
+
+        即使向量维度与元数据相符，只要新隔离字段缺失或类型不对，也不能把该索引标记
+        为就绪。抛错要求显式使用新索引版本，绝不原地更改现有索引或业务数据。
+        """
         s = self._settings
         prefixes = info.get("index_definition")
         if isinstance(prefixes, list):
@@ -189,6 +216,19 @@ class RedisSemanticIndexBootstrap:
         decoded_prefixes = _decode(prefixes)
         if decoded_prefixes not in ([s.key_prefix], (s.key_prefix,), s.key_prefix):
             raise CacheIndexMismatchError("Prefix 不一致")
+
+        raw_attributes = info.get("attributes")
+        if not isinstance(raw_attributes, list):
+            raise CacheIndexMismatchError("索引缺少 attributes")
+        attributes_by_name = {
+            str(attribute.get("attribute", attribute.get("identifier", ""))): attribute
+            for attribute in (_pairs_to_dict(raw) for raw in raw_attributes)
+        }
+        for field in _CACHE_BOUNDARY_TAG_FIELDS:
+            if str(attributes_by_name.get(field, {}).get("type", "")).upper() != "TAG":
+                raise CacheIndexMismatchError(
+                    f"索引缺少隔离 TAG 字段 {field}；请创建新的索引版本"
+                )
 
         attribute = _find_vector_attribute(info, s.vector_field)
         attributes = attribute.get("attributes", [])

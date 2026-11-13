@@ -13,6 +13,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from rag_service.bootstrap.database_schema import migration_sql
@@ -20,6 +21,13 @@ from rag_service.bootstrap.profiles import (
     SqlAlchemyProfileStore,
     import_profiles,
     load_profile_seeds,
+)
+from rag_service.domain.graph import (
+    GraphConfiguration,
+    GraphSnapshot,
+    GraphState,
+    GraphStatus,
+    GraphTask,
 )
 from rag_service.domain.models import (
     AnswerOutcome,
@@ -39,6 +47,7 @@ from rag_service.domain.models import (
     QueryStatus,
     SourcePosition,
 )
+from rag_service.infrastructure.postgres.graph_repository import SqlAlchemyGraphRepository
 from rag_service.infrastructure.postgres.repositories import (
     SqlAlchemyDocumentRepository,
     SqlAlchemyIdempotencyRepository,
@@ -68,6 +77,7 @@ def migrated_database_dsn() -> str:
         for filename in (
             "V1.0.0__init_schema.sql",
             "V1.0.0__to__V1.1.0__shared_knowledge_bases.sql",
+            "V1.1.0__to__V1.2.0__native_graphrag.sql",
         ):
             statement = migration_sql("rag_app", filename).replace(
                 "current_database() <> 'rag_app'", "current_database() <> 'rag_app_test'"
@@ -94,7 +104,7 @@ async def database_session(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_migration_creates_exactly_twelve_application_tables(
+async def test_migration_creates_exactly_thirteen_application_tables(
     database_session: AsyncSession,
 ) -> None:
     count = await database_session.scalar(
@@ -103,9 +113,8 @@ async def test_migration_creates_exactly_twelve_application_tables(
             "WHERE table_schema = 'rag_app' AND table_name <> 'alembic_version'"
         )
     )
-    # 层级索引一张、轻量实体图两张、安全文档版本一张；精确数量断言可以防止只改
-    # ORM 却漏掉 Alembic migration，或迁移意外生成未评审的业务表。
-    assert count == 12
+    # V1.2 比 V1.1 多出一张图谱状态表；精确数量断言防止只改 ORM 却漏掉迁移。
+    assert count == 13
 
 
 @pytest.mark.postgres
@@ -790,3 +799,328 @@ async def test_concurrent_content_revisions_preserve_edits_and_scope(
             assert not await repository.increment_revision(scope, kb.id)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_repository_scopes_state_and_advances_only_successful_cas(
+    database_session: AsyncSession,
+) -> None:
+    """真实数据库中图谱配置/任务指针完整回读，陈旧 CAS 和跨 Scope 写入均不覆盖状态。"""
+    scope = "c" * 64
+    other_scope = "d" * 64
+    knowledge_base = KnowledgeBase(
+        security_scope_id=scope, name="graph-repository-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1",
+    )
+    await SqlAlchemyKnowledgeBaseRepository(database_session).add(scope, knowledge_base)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    # 读取未启用状态不隐式插入行，既有知识库继续使用关闭默认值。
+    assert await graphs.get(scope, knowledge_base.id) is None
+    state = GraphState(security_scope_id=scope, knowledge_base_id=knowledge_base.id)
+    await graphs.add(scope, state)
+    first = await graphs.get(scope, knowledge_base.id)
+    stale = await graphs.get(scope, knowledge_base.id)
+    assert first is not None and stale is not None
+    assert first.configuration == GraphConfiguration()
+    assert await graphs.get(other_scope, knowledge_base.id) is None
+
+    first.configuration = GraphConfiguration(enabled=True, auto_build=False)
+    first.status = GraphStatus.BUILDING
+    first.configuration_version = 1
+    first.target_content_revision = 3
+    first.engine_task_id = "engine-task-fixture"
+    first.job_id = uuid4()
+    first.started_at = datetime.now(UTC)
+    assert await graphs.update(scope, first, expected_row_version=0)
+    assert first.row_version == 1
+    # CAS 成功同步调用方对象；失败保持旧对象版本，不把旧配置写回。
+    stale.configuration = GraphConfiguration(enabled=False)
+    assert not await graphs.update(scope, stale, expected_row_version=0)
+    assert stale.row_version == 0
+    with pytest.raises(ValueError, match="security scope"):
+        await graphs.update(other_scope, first, expected_row_version=1)
+    with pytest.raises(ValueError, match="security scope"):
+        await graphs.add(other_scope, first)
+    loaded = await graphs.get(scope, knowledge_base.id)
+    assert loaded is not None
+    assert loaded.status == GraphStatus.BUILDING
+    assert loaded.configuration == first.configuration
+    assert loaded.engine_task_id == first.engine_task_id
+    assert loaded.job_id == first.job_id
+    assert loaded.started_at == first.started_at
+    assert loaded.target_content_revision == 3 and loaded.row_version == 1
+    assert knowledge_base.revision == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_state_composite_fk_and_ready_constraint_reject_invalid_rows(
+    database_session: AsyncSession,
+) -> None:
+    """数据库最后防线拒绝跨 Scope 图谱，以及没有成功代数/内容版本却标记 READY 的行。"""
+    scope = "e" * 64
+    knowledge_base = KnowledgeBase(
+        security_scope_id=scope, name="graph-constraint-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1",
+    )
+    await SqlAlchemyKnowledgeBaseRepository(database_session).add(scope, knowledge_base)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    with pytest.raises(IntegrityError, match="fk_graph_state_knowledge_base"):
+        async with database_session.begin_nested():
+            await graphs.add("f" * 64, GraphState(
+                security_scope_id="f" * 64, knowledge_base_id=knowledge_base.id,
+            ))
+    with pytest.raises(IntegrityError, match="chk_graph_state_ready_version"):
+        async with database_session.begin_nested():
+            await graphs.add(scope, GraphState(
+                security_scope_id=scope, knowledge_base_id=knowledge_base.id,
+                status=GraphStatus.READY,
+            ))
+    assert await graphs.get(scope, knowledge_base.id) is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inflight", [
+    JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT, JobStatus.CANCEL_REQUESTED,
+])
+async def test_graph_jobs_allow_one_inflight_per_resource_knowledge_base(
+    database_session: AsyncSession, inflight: JobStatus,
+) -> None:
+    """在途构图部分唯一索引覆盖排队/运行/重试/取消；结束后可新建，普通任务不受影响。"""
+    scope = "9" * 64
+    knowledge_base = KnowledgeBase(
+        security_scope_id=scope, name="graph-job-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1",
+    )
+    await SqlAlchemyKnowledgeBaseRepository(database_session).add(scope, knowledge_base)
+    jobs = SqlAlchemyJobRepository(database_session)
+    graph_job = IngestionJob(
+        security_scope_id=scope, knowledge_base_id=knowledge_base.id,
+        job_type=JobType.GRAPH_BUILD, status=inflight,
+    )
+    await jobs.add(scope, graph_job)
+    with pytest.raises(IntegrityError, match="uk_graph_job_inflight"):
+        async with database_session.begin_nested():
+            await jobs.add(scope, IngestionJob(
+                security_scope_id=scope, knowledge_base_id=knowledge_base.id,
+                job_type=JobType.GRAPH_BUILD,
+            ))
+    # 常规上传可以与构图共存；终态不会永久占用唯一槽位。
+    await jobs.add(scope, IngestionJob(
+        security_scope_id=scope, knowledge_base_id=knowledge_base.id, job_type=JobType.UPLOAD,
+    ))
+    await database_session.execute(text(
+        "UPDATE rag_app.ingestion_job SET status='FAILED' "
+        "WHERE security_scope_id=:scope AND id=:id"
+    ), {"scope": scope, "id": graph_job.id})
+    replacement = IngestionJob(
+        security_scope_id=scope, knowledge_base_id=knowledge_base.id, job_type=JobType.GRAPH_BUILD,
+    )
+    await jobs.add(scope, replacement)
+    assert await jobs.get(scope, replacement.id) is not None
+    with pytest.raises(IntegrityError, match="chk_graph_job_knowledge_base"):
+        async with database_session.begin_nested():
+            await jobs.add(scope, IngestionJob(
+                security_scope_id=scope, job_type=JobType.GRAPH_BUILD,
+            ))
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_state_cas_between_independent_transactions_has_one_winner(
+    migrated_database_dsn: str,
+) -> None:
+    """两个 Worker 同时发布同一旧行版本时只有一次推进，迟到结果不能覆盖新图谱。"""
+    from sqlalchemy import delete
+
+    from rag_service.infrastructure.postgres.models import KnowledgeBaseRow
+
+    scope = uuid4().hex * 2
+    knowledge_base = KnowledgeBase(
+        security_scope_id=scope, name="graph-cas-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1",
+    )
+    engine = create_async_engine(migrated_database_dsn)
+    barrier = asyncio.Barrier(2)
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            await SqlAlchemyKnowledgeBaseRepository(session).add(scope, knowledge_base)
+            await SqlAlchemyGraphRepository(session).add(scope, GraphState(
+                security_scope_id=scope, knowledge_base_id=knowledge_base.id,
+            ))
+
+        async def publish() -> bool:
+            """先同时读取旧版本，再各自在独立事务 CAS；数据库串行化同一行更新。"""
+            async with AsyncSession(engine) as session, session.begin():
+                graphs = SqlAlchemyGraphRepository(session)
+                state = await graphs.get(scope, knowledge_base.id)
+                assert state is not None
+                await barrier.wait()
+                state.status = GraphStatus.READY
+                state.graph_generation = 1
+                state.built_for_revision = knowledge_base.revision
+                return await graphs.update(scope, state, expected_row_version=0)
+
+        assert sorted(await asyncio.gather(publish(), publish())) == [False, True]
+        async with AsyncSession(engine) as session:
+            state = await SqlAlchemyGraphRepository(session).get(scope, knowledge_base.id)
+            assert state is not None and state.row_version == state.graph_generation == 1
+            current_kb = await SqlAlchemyKnowledgeBaseRepository(session).get(
+                scope, knowledge_base.id,
+            )
+            assert current_kb is not None and current_kb.revision == knowledge_base.revision
+    finally:
+        # 只清理此用例创建的精确 Scope+UUID；graph_state 由已验证的复合外键级联删除。
+        async with AsyncSession(engine) as session, session.begin():
+            await session.execute(delete(KnowledgeBaseRow).where(
+                KnowledgeBaseRow.security_scope_id == scope,
+                KnowledgeBaseRow.id == knowledge_base.id,
+            ))
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_queued_graph_cancellation_is_claimed_and_confirmed_without_engine_submission(
+    database_session: AsyncSession,
+) -> None:
+    """真实PG中排队取消仍可认领；外部构建从未开始时安全结束，不遗留QUEUED。"""
+    from rag_service.application.graph import GraphService
+    from rag_service.application.graph_worker import GraphWorker
+
+    scope = "8" * 64
+    kb = KnowledgeBase(
+        security_scope_id=scope, name="graph-queued-cancel-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1", status=KnowledgeBaseStatus.READY,
+    )
+    kbs = SqlAlchemyKnowledgeBaseRepository(database_session)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    jobs = SqlAlchemyJobRepository(database_session)
+    await kbs.add(scope, kb)
+    await graphs.add(
+        scope, GraphState(scope, kb.id, configuration=GraphConfiguration(enabled=True))
+    )
+    service = GraphService(kbs, graphs, jobs, enabled=True, model_ref="synthetic")
+    state = await service.enqueue(scope, kb.id)
+    job = await jobs.get(scope, state.job_id)
+    job.status = JobStatus.CANCEL_REQUESTED
+    assert await jobs.update(scope, job)
+    state.status = GraphStatus.CANCELLING
+    assert await graphs.update(scope, state, expected_row_version=state.row_version)
+    claimed = await jobs.claim_next(
+        worker_id="graph-cancel-fixture", now=datetime.now(UTC),
+        locked_until=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert claimed.id == job.id and claimed.status == JobStatus.CANCEL_REQUESTED
+    owned = SqlAlchemyJobRepository(
+        database_session, worker_id="graph-cancel-fixture", owned_job=(scope, job.id),
+    )
+
+    async def checkpoint() -> None:
+        """使用与真实Runner相同的guard→commit→reset顺序。"""
+        await owned.guard_ownership()
+        await database_session.commit()
+        owned.reset_ownership_guard()
+
+    await GraphWorker(kbs, graphs, owned, object(), service, checkpoint=checkpoint).execute(claimed)
+    assert (await jobs.get(scope, job.id)).status == JobStatus.CANCELLED
+    assert (await graphs.get(scope, kb.id)).status == GraphStatus.STALE
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_graph_followup_job_commits_under_old_lease_in_one_transaction(
+    database_session: AsyncSession,
+) -> None:
+    """真实PG唯一索引与租约一起验证：旧终态与新排队Job必须一次提交。"""
+    from rag_service.application.graph import GraphService
+    from rag_service.application.graph_worker import GraphWorker
+
+    scope = "7" * 64
+    kb = KnowledgeBase(
+        security_scope_id=scope, name="graph-successor-fixture",
+        parser_profile_ref="deepdoc-default@1", chunk_profile_ref="general-512@1",
+        embedding_profile_ref="embedding-openai-compatible@3",
+        retrieval_profile_ref="hybrid-default@1", status=KnowledgeBaseStatus.READY,
+    )
+    kbs = SqlAlchemyKnowledgeBaseRepository(database_session)
+    graphs = SqlAlchemyGraphRepository(database_session)
+    jobs = SqlAlchemyJobRepository(database_session)
+    await kbs.add(scope, kb)
+    await graphs.add(
+        scope, GraphState(scope, kb.id, configuration=GraphConfiguration(enabled=True))
+    )
+    service = GraphService(kbs, graphs, jobs, enabled=True, model_ref="synthetic")
+    state = await service.enqueue(scope, kb.id)
+    job = await jobs.claim_next(
+        worker_id="graph-successor-fixture", now=datetime.now(UTC),
+        locked_until=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert job.id == state.job_id
+    owned = SqlAlchemyJobRepository(
+        database_session, worker_id="graph-successor-fixture", owned_job=(scope, job.id),
+    )
+    worker_service = GraphService(kbs, graphs, owned, enabled=True, model_ref="synthetic")
+
+    async def checkpoint() -> None:
+        """末次提交之后不能再用终态任务的旧租约进行下一次提交。"""
+        await owned.guard_ownership()
+        await database_session.commit()
+        owned.reset_ownership_guard()
+
+    class CompletedEngine:
+        """只替代上游网络；数据库、任务约束和租约均使用真实PostgreSQL。"""
+
+        submitted = False
+
+        async def configure(self, *_args: object, previous_task_id: str | None) -> None:
+            """接受已持久化的旧任务准备引用；测试配置没有外部副作用。"""
+            return None
+
+        async def build(self, resource_scope: str, kb_id: object, generation: int) -> GraphTask:
+            """返回合成完成任务，不代表真实RAGFlow联调通过。"""
+            self.submitted = True
+            return GraphTask(
+                scope, kb.id, generation, "synthetic-completed", GraphStatus.READY, 1.0
+            )
+
+        async def task(
+            self,
+            resource_scope: str,
+            kb_id: object,
+            generation: int,
+        ) -> GraphTask | None:
+            """首次准备前没有原生任务，提交后才返回同一合成任务，符合公开协议。"""
+            if not self.submitted:
+                return None
+            return GraphTask(
+                scope, kb.id, generation, "synthetic-completed", GraphStatus.READY, 1.0
+            )
+
+        async def snapshot(
+            self, resource_scope: str, kb_id: object, generation: int
+        ) -> GraphSnapshot:
+            """模拟构图期间内容发布，触发后继任务的真实事务路径。"""
+            await kbs.increment_revision(scope, kb.id)
+            return GraphSnapshot(scope, kb.id, generation)
+
+    await GraphWorker(
+        kbs, graphs, owned, CompletedEngine(), worker_service, checkpoint=checkpoint,
+    ).execute(job)
+    current = await graphs.get(scope, kb.id)
+    assert current.status == GraphStatus.QUEUED and current.job_id != job.id
+    assert current.target_content_revision == kb.revision + 1
+    assert (await jobs.get(scope, job.id)).status == JobStatus.SUCCEEDED
+    assert (await jobs.get(scope, current.job_id)).status == JobStatus.PENDING

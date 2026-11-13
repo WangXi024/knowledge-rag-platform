@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -78,6 +79,8 @@ class JobType(StrEnum):
     DELETE_DOCUMENT = "DELETE_DOCUMENT"
     DELETE_KB = "DELETE_KB"
     CLEANUP = "CLEANUP"
+    # 原生图谱是知识库级派生任务，与逐文档解析的 READY 状态独立。
+    GRAPH_BUILD = "GRAPH_BUILD"
 
 
 class DocumentVersionStatus(StrEnum):
@@ -309,6 +312,18 @@ class SourcePosition:
     """文本块在原文件中的位置，可包含页码和页面坐标框。"""
     page: int | None = None
     bbox: tuple[float, float, float, float] | None = None
+
+
+def is_pageless_text(filename: str, mime_type: str) -> bool:
+    """识别没有物理页布局的 TXT/Markdown，避免把解析器占位坐标当成页码。
+
+    文件后缀和 MIME 均来自已登记的文档或候选版本，不使用 Chunk 自报格式。仅处理
+    明确的文本格式，不泛化所有 ``text/*``，PDF 和图片仍沿用其原有位置语义。
+    """
+    return Path(filename).suffix.lower() in {".txt", ".md", ".markdown"} or (
+        mime_type.partition(";")[0].strip().lower()
+        in {"text/plain", "text/markdown", "text/x-markdown"}
+    )
 
 
 @dataclass(frozen=True, slots=True)

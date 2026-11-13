@@ -26,6 +26,7 @@ from rag_service.settings import CacheSection
 
 _TAG_SPECIAL = re.compile(r"([^A-Za-z0-9_])")
 _QUERY_TYPES = frozenset({"fact", "list", "comparison", "summary", "multi_hop"})
+_EXTENDED_BOUNDARY_FIELDS = ("filter_hash", "graph_version_hash", "graph_mode")
 
 
 class RedisPipeline(Protocol):
@@ -86,7 +87,11 @@ class RedisAnswerCache:
         boundary: CacheBoundary,
         normalized_question: str,
     ) -> CacheEntry | None:
-        """计算精确 cache_id，读取 JSON 并确认记录边界仍与调用边界相等。"""
+        """读取当前精确键并核对完整边界；旧记录缺过滤/图谱字段时安全未命中。
+
+        旧 JSON 不具备足够信息证明查询范围，所以只让它自然过期，不补默认值、不删除
+        Redis 数据。损坏协议仍交由调用方的缓存降级处理，不返回未经核验的答案。
+        """
         if not self._settings.exact_enabled:
             return None
         identifier = cache_id(boundary, normalized_question)
@@ -94,6 +99,9 @@ class RedisAnswerCache:
         if raw is None:
             return None
         value = _decode_json(raw)
+        stored_boundary = value.get("boundary")
+        if not isinstance(stored_boundary, dict) or not _has_extended_boundary(stored_boundary):
+            return None
         entry = _entry(value, similarity=None)
         if (
             entry.cache_id != identifier
@@ -111,7 +119,8 @@ class RedisAnswerCache:
         """对问题向量执行 KNN，并只返回超过相似度阈值且边界完全一致的记录。
 
         Redis 返回 cosine distance，本方法转换为 ``1 - distance`` 相似度；查询中的每个
-        TAG 值都转义，避免租户/Profile 文本改变 RediSearch 查询结构。
+        TAG 值都转义，避免租户/Profile 文本改变 RediSearch 查询结构。过滤摘要和图谱
+        版本/模式同时进入索引条件及逐条回读校验，缺字段的旧 Hash 安全跳过。
         """
         if not self._settings.semantic_enabled:
             return ()
@@ -128,6 +137,9 @@ class RedisAnswerCache:
                 f"@model_profile:{{{_escape_tag(boundary.model_profile)}}}",
                 f"@language:{{{_escape_tag(boundary.language)}}}",
                 f"@history_hash:{{{_escape_tag(boundary.history_hash)}}}",
+                f"@filter_hash:{{{_escape_tag(boundary.filter_hash)}}}",
+                f"@graph_version_hash:{{{_escape_tag(boundary.graph_version_hash)}}}",
+                f"@graph_mode:{{{_escape_tag(boundary.graph_mode)}}}",
                 f"@expires_at_ms:[{now_ms} +inf]",
             )
         )
@@ -149,7 +161,7 @@ class RedisAnswerCache:
             "SORTBY",
             "vector_distance",
             "RETURN",
-            12,
+            15,
             "cache_id",
             "security_scope_id",
             "knowledge_base_revisions_hash",
@@ -158,6 +170,9 @@ class RedisAnswerCache:
             "model_profile",
             "language",
             "history_hash",
+            "filter_hash",
+            "graph_version_hash",
+            "graph_mode",
             "normalized_question",
             "answer_json",
             "citations_json",
@@ -167,6 +182,10 @@ class RedisAnswerCache:
         )
         entries: list[CacheEntry] = []
         for fields in _search_documents(raw):
+            # 搜索服务可能返回滚动升级前的记录；缺少任一新隔离维度时只跳过该条，
+            # 不让一条历史 Hash 使其他有效语义命中也一起失效。
+            if not _has_extended_boundary(fields):
+                continue
             distance = float(_text(fields.get("vector_distance", "1")))
             similarity = 1.0 - distance
             if similarity < self._settings.semantic.similarity_threshold:
@@ -178,7 +197,11 @@ class RedisAnswerCache:
         return tuple(entries)
 
     async def put(self, value: CacheEntry) -> None:
-        """生成问题向量，并通过 Pipeline 原子式写入 Hash 字段和 TTL。"""
+        """生成问题向量，并保存含过滤/图谱边界的 JSON、Hash 与 TTL。
+
+        两种表示写入同样的三个新字段，确保精确读取、语义 TAG 过滤和回读检查使用一致
+        语义。只写当前版本配置的缓存前缀，不修改旧索引或清理旧记录。
+        """
         identifier = cache_id(value.boundary, value.normalized_question)
         if identifier != value.cache_id:
             raise ValueError("cache_id does not match cache boundary")
@@ -217,6 +240,9 @@ class RedisAnswerCache:
                 "model_profile": boundary.model_profile,
                 "language": boundary.language,
                 "history_hash": boundary.history_hash,
+                "filter_hash": boundary.filter_hash,
+                "graph_version_hash": boundary.graph_version_hash,
+                "graph_mode": boundary.graph_mode,
                 "normalized_question": value.normalized_question,
                 "answer_json": json.dumps(
                     {
@@ -314,7 +340,7 @@ def _search_documents(value: Any) -> tuple[dict[str, Any], ...]:
 
 
 def _boundary(value: dict[str, Any]) -> CacheBoundary:
-    """从持久化 JSON 重建完整缓存边界。"""
+    """从当前格式重建完整边界；新增字段必须显式存在，禁止静默回填历史语义。"""
     return CacheBoundary(
         security_scope_id=str(value["security_scope_id"]),
         knowledge_base_revisions_hash=str(value["knowledge_base_revisions_hash"]),
@@ -323,6 +349,21 @@ def _boundary(value: dict[str, Any]) -> CacheBoundary:
         model_profile=str(value["model_profile"]),
         language=str(value["language"]),
         history_hash=str(value["history_hash"]),
+        filter_hash=str(value["filter_hash"]),
+        graph_version_hash=str(value["graph_version_hash"]),
+        graph_mode=str(value["graph_mode"]),
+    )
+
+
+def _has_extended_boundary(value: dict[str, Any]) -> bool:
+    """检查持久化记录显式声明了过滤和图谱维度，不把旧格式猜成当前边界。
+
+    JSON 使用字符串，Redis Hash 可能返回 bytes；只接受两种非空文本。缺失、空值或
+    其他类型返回 False，读取方将其视为缓存未命中；不修改原记录或接触外部服务。
+    """
+    return all(
+        isinstance(value.get(field), str | bytes) and bool(_text(value[field]))
+        for field in _EXTENDED_BOUNDARY_FIELDS
     )
 
 
@@ -374,7 +415,7 @@ def _entry(value: dict[str, Any], similarity: float | None) -> CacheEntry:
 
 
 def _entry_from_hash(value: dict[str, Any], similarity: float) -> CacheEntry:
-    """从语义索引 Hash 字段重建条目，并附加本次 KNN 相似度。"""
+    """从含完整过滤/图谱边界的当前 Hash 重建条目，附加本次 KNN 相似度。"""
     answer = _decode_json(value["answer_json"])
     citations_raw = json.loads(_text(value["citations_json"]))
     if not isinstance(citations_raw, list):
@@ -389,6 +430,9 @@ def _entry_from_hash(value: dict[str, Any], similarity: float) -> CacheEntry:
             model_profile=_text(value["model_profile"]),
             language=_text(value["language"]),
             history_hash=_text(value["history_hash"]),
+            filter_hash=_text(value["filter_hash"]),
+            graph_version_hash=_text(value["graph_version_hash"]),
+            graph_mode=_text(value["graph_mode"]),
         ),
         normalized_question=_text(value["normalized_question"]),
         answer=str(answer["answer"]),
@@ -431,7 +475,7 @@ def _entry_from_hash(value: dict[str, Any], similarity: float) -> CacheEntry:
 
 
 def _entry_json(value: CacheEntry) -> dict[str, Any]:
-    """把强类型缓存条目转换为可 JSON 序列化结构。"""
+    """序列化完整条目，显式持久化过滤/图谱边界以拒绝旧格式和跨范围复用。"""
     return {
         "cache_id": value.cache_id,
         "boundary": {
@@ -442,6 +486,9 @@ def _entry_json(value: CacheEntry) -> dict[str, Any]:
             "model_profile": value.boundary.model_profile,
             "language": value.boundary.language,
             "history_hash": value.boundary.history_hash,
+            "filter_hash": value.boundary.filter_hash,
+            "graph_version_hash": value.boundary.graph_version_hash,
+            "graph_mode": value.boundary.graph_mode,
         },
         "normalized_question": value.normalized_question,
         "answer": value.answer,
