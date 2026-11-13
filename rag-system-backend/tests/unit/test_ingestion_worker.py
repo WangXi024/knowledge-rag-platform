@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from rag_service.application.ingestion_worker import IngestionWorker
+from rag_service.application.ingestion_worker import IngestionWorker, _worker_security_context
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.errors import RagError, RagFlowError
 from rag_service.domain.models import (
@@ -489,6 +489,7 @@ class FakeVersionEngine:
         self.chunk_availability_commands: list[SetEngineVersionChunksAvailabilityCommand] = []
         self.upload_command: UploadDocumentVersionCommand | None = None
         self.metadata_command: UpdateEngineDocumentVersionCommand | None = None
+        self.chunk_queries: list[ListEngineVersionChunksQuery] = []
 
     async def upload_document_version(
         self, command: UploadDocumentVersionCommand
@@ -521,6 +522,7 @@ class FakeVersionEngine:
 
     async def list_document_version_chunks(self, query: ListEngineVersionChunksQuery) -> Page:
         """分别返回活动版和候选版真实 Chunk，支持发布时双向可用性切换。"""
+        self.chunk_queries.append(query)
         chunk_id = "chunk-v2" if query.engine_document_id == "engine-v2" else "chunk-v1"
         if chunk_id == "chunk-v2" and not self.candidate_has_chunks:
             return Page(items=(), page=query.page, page_size=query.page_size, total=0)
@@ -1279,6 +1281,47 @@ async def test_parse_worker_propagates_cancellation_to_ragflow() -> None:
     assert result.status == JobStatus.CANCELLED
     assert document.status == DocumentStatus.FAILED
     assert engine.stop_command is not None
+
+
+@pytest.mark.parametrize(
+    ("active_filename", "active_mime", "version_filename", "version_mime"),
+    [("active.pdf", "application/pdf", "candidate.md", "text/markdown"),
+     ("active.txt", "text/plain", "candidate.pdf", "application/pdf")],
+)
+@pytest.mark.asyncio
+async def test_version_chunk_read_passes_candidate_format_instead_of_active_format(
+    active_filename: str, active_mime: str, version_filename: str, version_mime: str,
+) -> None:
+    """候选跨格式更新时，位置解析契约显式携带候选版本而非旧主记录的类型。"""
+    document, job, staged_file_id = _records()
+    document.filename, document.mime_type = active_filename, active_mime
+    version = DocumentVersion(
+        security_scope_id=document.security_scope_id,
+        knowledge_base_id=document.knowledge_base_id,
+        document_id=document.id,
+        version_number=2,
+        filename=version_filename,
+        safe_filename=version_filename,
+        mime_type=version_mime,
+        file_size_bytes=7,
+        content_sha256="b" * 64,
+        parser_profile_ref="office-default@1",
+        chunk_profile_ref="general-256@2",
+        ragflow_document_id="engine-v2",
+    )
+    engine = FakeVersionEngine(document.id)
+    worker = IngestionWorker(
+        FakeDocuments(document), FakeJobs(job), FakeStaging(staged_file_id), engine,
+    )
+
+    chunks = await worker._load_version_chunks(
+        _worker_security_context(document.security_scope_id, job.id), document, version,
+    )
+
+    assert len(chunks) == len(engine.chunk_queries) == 1
+    assert engine.chunk_queries[0].filename == version_filename
+    assert engine.chunk_queries[0].mime_type == version_mime
+    assert document.filename == active_filename and document.mime_type == active_mime
 
 
 @pytest.mark.asyncio

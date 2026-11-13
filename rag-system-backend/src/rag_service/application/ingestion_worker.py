@@ -1239,6 +1239,8 @@ class IngestionWorker:
                     knowledge_base_id=document.knowledge_base_id,
                     document_id=document.id,
                     engine_document_id=version.ragflow_document_id,
+                    filename=version.filename,
+                    mime_type=version.mime_type,
                     page=page_number,
                     page_size=100,
                 )

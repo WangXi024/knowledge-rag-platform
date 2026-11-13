@@ -183,12 +183,14 @@ class StopEngineDocumentVersionCommand:
 
 @dataclass(frozen=True, slots=True)
 class ListEngineVersionChunksQuery:
-    """读取候选版本的原始 Chunk，并映射回稳定逻辑 document_id。"""
+    """读取候选原始 Chunk；文件格式必须来自候选版本，不能沿用旧活动版。"""
 
     security: SecurityContext
     knowledge_base_id: UUID
     document_id: UUID
     engine_document_id: str
+    filename: str
+    mime_type: str
     page: int = 1
     page_size: int = 20
 

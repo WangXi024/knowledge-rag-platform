@@ -607,7 +607,8 @@ def _resources(
         score=0.9,
         resource_scope_id=security.tenant_resource_scope_id,
         vector_score=0.9,
-        positions=(SourcePosition(page=1, bbox=(0, 0, 1, 1)),),
+        # 与真实 TXT 适配器契约一致：无物理页码，也没有页面坐标。
+        positions=(),
     )
     return knowledge_base, document, candidate
 
@@ -2070,6 +2071,86 @@ async def test_exact_cache_hit_revalidates_citation_and_skips_downstream(
     assert len(llm.requests) == 1
     assert len(engine.queries) == 2
     assert second.citations[0].citation_id != first.citations[0].citation_id
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("filename,mime_type", [("fixture.pdf", "application/pdf"),
+                                               ("fixture.png", "image/png")])
+@pytest.mark.asyncio
+async def test_paged_source_positions_remain_valid_in_exact_and_semantic_cache(
+    service_settings: ServiceSettings, semantic: bool, filename: str, mime_type: str,
+) -> None:
+    """文本占位过滤不影响 PDF/图片的真实页码坐标，也不无故使其缓存失效。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, document = _service(
+        service_settings, llm_responses=["真实页面证据 [C1]"], cache=cache,
+    )
+    document.filename, document.mime_type = filename, mime_type
+    position = SourcePosition(page=2, bbox=(0.0, 1.0, 2.0, 3.0))
+    engine.vector = engine.term = tuple(
+        replace(item, document_name=filename, positions=(position,)) for item in engine.vector
+    )
+    value = AnswerInput(knowledge_base_ids=(knowledge_base.id,), query="paged source cache")
+    first = await service.answer(_security(), value)
+    assert first.citations[0].positions == (position,)
+    assert first.citations[0].page_start == first.citations[0].page_end == 2
+    if semantic:
+        cache.semantic_entry, cache.entry = cache.entry, None
+
+    replay = await service.answer(_security(), replace(value, request_id=uuid4()))
+
+    assert replay.cache_type == ("semantic" if semantic else "exact")
+    assert replay.citations[0].positions == (position,)
+    assert replay.citations[0].page_start == replay.citations[0].page_end == 2
+    assert len(llm.requests) == 1 and len(engine.queries) == 2
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("invalid_location", ["range", "page", "bbox"])
+@pytest.mark.asyncio
+async def test_pageless_text_rejects_old_position_cache_for_json_and_sse(
+    service_settings: ServiceSettings, semantic: bool, streaming: bool, invalid_location: str,
+) -> None:
+    """精确/语义旧缓存中的文本页码或坐标不能污染 JSON/SSE，新答案重新回读证据。"""
+    cache = FakeCache()
+    service, engine, llm, knowledge_base, _ = _service(
+        service_settings, llm_responses=["旧答案 [C1]", "重新生成答案 [C1]"], cache=cache,
+    )
+    value = AnswerInput(knowledge_base_ids=(knowledge_base.id,), query="source location cache")
+    first = await service.answer(_security(), value)
+    assert first.citations[0].positions == ()
+    assert first.citations[0].page_start is first.citations[0].page_end is None
+    assert cache.entry is not None
+    original = cache.entry.citations[0]
+    if invalid_location == "range":
+        corrupted = replace(original, page_start=2, page_end=2)
+    elif invalid_location == "page":
+        corrupted = replace(original, positions=(SourcePosition(page=2),))
+    else:
+        corrupted = replace(original, positions=(SourcePosition(bbox=(1.0, 1.0, 1.0, 1.0)),))
+    stale = replace(cache.entry, citations=(corrupted,))
+    if semantic:
+        cache.entry = None
+        cache.semantic_entry = stale
+    else:
+        cache.entry = stale
+    replay = replace(value, request_id=uuid4())
+    if streaming:
+        events = [event async for event in service.stream_answer(_security(), replay)]
+        assert events[-1].data["cache_type"] == "none"
+        assert events[-1].data["outcome"] == "success"
+        citations = tuple(cast(Citation, event.data["citation"])
+                          for event in events if event.event == "citation")
+    else:
+        fresh = await service.answer(_security(), replay)
+        assert fresh.cache_type == "none" and fresh.answer == "重新生成答案 [C1]"
+        citations = fresh.citations
+    assert len(citations) == 1
+    assert citations[0].positions == ()
+    assert citations[0].page_start is citations[0].page_end is None
+    assert len(llm.requests) == 2 and len(engine.queries) == 4
+    assert len(cache.puts) == 2 and cache.hits == []
 
 
 @pytest.mark.parametrize("semantic", [False, True])

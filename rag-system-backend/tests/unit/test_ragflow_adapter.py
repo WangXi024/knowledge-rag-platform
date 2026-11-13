@@ -13,13 +13,14 @@ import httpx
 import pytest
 
 from rag_service.domain.errors import RagFlowError, ResourceNotFoundError
-from rag_service.domain.models import DocumentRecord, KnowledgeBase
+from rag_service.domain.models import DocumentRecord, KnowledgeBase, SourcePosition
 from rag_service.domain.ports import (
     CreateDatasetCommand,
     DeleteEngineDatasetCommand,
     EngineRetrievalQuery,
     GetEngineDatasetQuery,
     ListEngineChunksQuery,
+    ListEngineVersionChunksQuery,
     ParseDocumentCommand,
     SetEngineDocumentVersionAvailabilityCommand,
     SetEngineVersionChunksAvailabilityCommand,
@@ -903,7 +904,10 @@ async def test_chunks_and_retrieval_map_back_to_stable_local_ids(
     security: SecurityContext,
 ) -> None:
     knowledge_base = _knowledge_base(security)
-    document = _document(security, knowledge_base)
+    # 页码格式转换使用真实有物理页的文档，纯文本不能承载页面坐标。
+    document = _document(
+        security, knowledge_base, filename="fixture.pdf", mime_type="application/pdf"
+    )
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
@@ -977,6 +981,67 @@ async def test_chunks_and_retrieval_map_back_to_stable_local_ids(
     # RAGFlow 返回的 document_keyword 可能带引擎内部 UUID 前缀；对外名称必须来自
     # 当前 Scope 已验证的本地 DocumentRecord，确保基础路线和侧车路线显示一致。
     assert retrieval.candidates[0].document_name == document.filename
+
+
+@pytest.mark.parametrize(
+    ("active_filename", "active_mime", "version_filename", "version_mime",
+     "active_pageless", "version_pageless"),
+    [
+        ("active.TXT", "application/octet-stream", "candidate.md", "text/markdown", True, True),
+        ("active.md", "text/markdown", "candidate.txt", "text/plain", True, True),
+        ("active.pdf", "application/pdf", "candidate.txt", "text/plain", False, True),
+        ("active.txt", "text/plain", "candidate.pdf", "application/pdf", True, False),
+        ("active.png", "image/png", "candidate.md", "text/markdown", False, True),
+        ("active.md", "text/markdown", "candidate.png", "image/png", True, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_positions_follow_actual_source_format_for_all_chunk_entry_points(
+    security: SecurityContext,
+    active_filename: str,
+    active_mime: str,
+    version_filename: str,
+    version_mime: str,
+    active_pageless: bool,
+    version_pageless: bool,
+) -> None:
+    """三个入口均剔除文本占位位置；跨格式候选使用自身格式，PDF/图片保留原定位。"""
+    knowledge_base = _knowledge_base(security)
+    document = _document(
+        security, knowledge_base, filename=active_filename, mime_type=active_mime
+    )
+    content = "\nSynthetic source text remains unchanged.\r\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """同一合成原文返回上游占位位置，模拟列表和检索两种公开响应。"""
+        chunk = {"id": "chunk-1", "content": content, "positions": [[2, 1, 1, 1, 1]]}
+        if request.method == "POST":
+            chunk.update({"dataset_id": "engine-dataset-1", "document_id": "engine-document-1",
+                          "similarity": 0.9})
+        return httpx.Response(200, json={"code": 0, "data": {"chunks": [chunk], "total": 1}})
+
+    async with _client(handler) as connection:
+        adapter = RagFlowAdapter(
+            _settings(), FakeKnowledgeBaseRepository((knowledge_base,)),
+            FakeDocumentRepository((document,)), client=connection,
+        )
+        listed = await adapter.list_chunks(ListEngineChunksQuery(
+            security=security, knowledge_base_id=knowledge_base.id, document_id=document.id,
+        ))
+        retrieved = await adapter.retrieve(EngineRetrievalQuery(
+            security=security, knowledge_base_ids=(knowledge_base.id,), question="Synthetic source",
+        ))
+        version = await adapter.list_document_version_chunks(ListEngineVersionChunksQuery(
+            security=security, knowledge_base_id=knowledge_base.id, document_id=document.id,
+            engine_document_id="engine-candidate", filename=version_filename,
+            mime_type=version_mime,
+        ))
+    upstream_positions = (SourcePosition(page=2, bbox=(1.0, 1.0, 1.0, 1.0)),)
+    expected_active = () if active_pageless else upstream_positions
+    assert listed.items[0].positions == retrieved.candidates[0].positions == expected_active
+    assert version.items[0].positions == (() if version_pageless else upstream_positions)
+    assert listed.items[0].content == retrieved.candidates[0].content == version.items[0].content
+    assert version.items[0].content == content
 
 
 @pytest.mark.asyncio

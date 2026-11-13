@@ -26,6 +26,7 @@ from rag_service.domain.models import (
     KnowledgeBase,
     RetrievalCandidate,
     SourcePosition,
+    is_pageless_text,
 )
 from rag_service.domain.ports import (
     CreateDatasetCommand,
@@ -153,8 +154,10 @@ def _ragflow_duplicate_name_index(expected_name: str, actual_name: str) -> int |
     return int(matched.group(1)) if matched else None
 
 
-def _positions(value: Any) -> tuple[SourcePosition, ...]:
-    """兼容 RAGFlow 的对象/数组位置格式，规范化页码与四元坐标。"""
+def _positions(value: Any, *, filename: str, mime_type: str) -> tuple[SourcePosition, ...]:
+    """规范化真实布局位置；TXT/Markdown 的占位页码和坐标不作为引用事实。"""
+    if is_pageless_text(filename, mime_type):
+        return ()
     if not isinstance(value, list):
         return ()
     positions: list[SourcePosition] = []
@@ -951,7 +954,9 @@ class RagFlowAdapter:
                 engine_chunk_id=_string(item.get("id")),
                 document_id=query.document_id,
                 content=_string(item.get("content")),
-                positions=_positions(item.get("positions")),
+                positions=_positions(
+                    item.get("positions"), filename=query.filename, mime_type=query.mime_type
+                ),
                 metadata=_dict(item.get("metadata")) if item.get("metadata") is not None else {},
             )
             for item in (_dict(raw) for raw in _list(data.get("chunks")))
@@ -1338,7 +1343,9 @@ class RagFlowAdapter:
                 engine_chunk_id=_string(item.get("id")),
                 document_id=document.id,
                 content=_string(item.get("content")),
-                positions=_positions(item.get("positions")),
+                positions=_positions(
+                    item.get("positions"), filename=document.filename, mime_type=document.mime_type
+                ),
                 metadata=_dict(item.get("metadata")) if item.get("metadata") is not None else {},
             )
             for item in (_dict(raw) for raw in _list(data.get("chunks")))
@@ -1455,7 +1462,11 @@ class RagFlowAdapter:
                         if item.get("term_similarity") is not None
                         else None
                     ),
-                    positions=_positions(item.get("positions")),
+                    positions=_positions(
+                        item.get("positions"),
+                        filename=document.filename,
+                        mime_type=document.mime_type,
+                    ),
                     metadata=(
                         _dict(item.get("metadata")) if item.get("metadata") is not None else {}
                     ),

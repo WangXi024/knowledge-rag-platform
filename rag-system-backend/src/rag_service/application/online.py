@@ -49,6 +49,7 @@ from rag_service.domain.models import (
     QueryRecord,
     QueryStatus,
     RetrievalCandidate,
+    is_pageless_text,
 )
 from rag_service.domain.ports import (
     AnswerCachePort,
@@ -1731,6 +1732,18 @@ class OnlineService:
             and document.status == DocumentStatus.READY
             and document.knowledge_base_id == citation.knowledge_base_id
             and document.security_scope_id == citation.resource_scope_id
+            # 旧缓存可能保留 TXT/Markdown 的上游占位页码；不能绕过新位置规范重放。
+            and (
+                not is_pageless_text(document.filename, document.mime_type)
+                or (
+                    citation.page_start is None
+                    and citation.page_end is None
+                    and all(
+                        position.page is None and position.bbox is None
+                        for position in citation.positions
+                    )
+                )
+            )
             for citation in value.citations
         )
 
