@@ -111,9 +111,12 @@ export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
   }
 
   const inFlight = Boolean(state && IN_FLIGHT.has(state.status));
-  // 目标快照不等于当前内容版本，尤其关闭自动重建后二者可能长期不同。
-  const isCurrent = state?.built_for_revision === knowledgeBase.revision;
+  // 父列表可能停留在上传被接收时的旧版本。图谱刷新以后台状态及同次响应的版本为准，
+  // 不拿旧列表误判过期；若列表已知更新版本，则仍保守等待新图状态，后台 STALE 也保持原样。
+  const isCurrent = state?.built_for_revision != null && state.built_for_revision === state.target_content_revision && knowledgeBase.revision <= state.target_content_revision;
   const status = state?.status === 'READY' && !isCurrent ? 'STALE' : state?.status;
+  // 内容版本只会递增，展示列表与图谱接口已观察到的较新版本，避免显示“已构建 2/当前 1”。
+  const contentRevision = Math.max(knowledgeBase.revision, state?.target_content_revision ?? 0);
   const canBuild = available && state?.configuration.enabled && !busy && !inFlight && !dirty && !error;
   const buildLabel = state?.status === 'FAILED' ? '重试构建' : state?.built_for_revision == null ? '构建图谱' : '重建图谱';
 
@@ -131,7 +134,7 @@ export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
         <>
           <div className="graph-summary" aria-live="polite">
             <strong className={`graph-status graph-status-${status?.toLowerCase()}`}>{status ? STATUS_LABELS[status] : '未知状态'}</strong>
-            <span>当前内容版本 {knowledgeBase.revision}</span>
+            <span>当前内容版本 {contentRevision}</span>
             <span>构图目标版本 {state.target_content_revision}</span>
             <span>已构建内容版本 {state.built_for_revision ?? '—'}</span>
             <span>图谱代数 {state.graph_generation}</span>

@@ -29,8 +29,8 @@ function response(status = 'DISABLED', overrides = {}) {
   } };
 }
 
-/** 按 Hook 槽保存状态、依赖和清理函数，虚拟时钟只执行测试指定的一轮定时器。 */
-function mount(gatewayRequest, available = true) {
+/** 按 Hook 槽保存状态、依赖和清理函数；revision 可模拟尚未更新的父列表快照。 */
+function mount(gatewayRequest, available = true, revision = 7) {
   const slots = [], effects = new Map(), timers = new Map();
   let cursor = 0, nextTimer = 0, updates = 0;
   const exports = {};
@@ -68,7 +68,7 @@ function mount(gatewayRequest, available = true) {
     : React.isValidElement(value) ? text(value.props.children) : typeof value === 'string' ? value : '';
   const render = () => {
     cursor = 0;
-    const tree = exports.KnowledgeGraphSettings({ session, knowledgeBase: { id, name: '合成知识库' }, available });
+    const tree = exports.KnowledgeGraphSettings({ session, knowledgeBase: { id, name: '合成知识库', revision }, available });
     for (const effect of effects.values()) if (effect.pending) {
       effect.cleanup?.(); effect.cleanup = effect.pending(); effect.pending = undefined;
     }
@@ -144,6 +144,57 @@ test('polling preserves an unsaved draft and never presents an old revision as r
   assert.equal(view.button('保存图谱配置').props.disabled, false);
   assert.equal(view.button('重建图谱').props.disabled, true);
   view.unmount();
+});
+
+test('refresh trusts current backend graph revisions over an old parent list and preserves stale or queued states', async () => {
+  // 上传被接收时父列表仍为 1；后台已完成内容 2 的自动构图，不能误导管理员再次付费重建。
+  let status = 'READY', target = 2;
+  let calls = 0;
+  const view = mount(async () => {
+    calls++;
+    return response(status, { built_for_revision: 2, target_content_revision: target, graph_generation: 1 });
+  }, true, 1);
+  view.html(); view.tick(0); await flush();
+  let html = view.html();
+  assert.match(html, />可用</);
+  assert.match(html, /当前内容版本 2/);
+  assert.match(html, /构图目标版本 2/);
+  assert.match(html, /已构建内容版本 2/);
+  assert.doesNotMatch(html, /内容已变更，待重建|现有图谱与当前内容版本不一致/);
+
+  view.button('刷新图谱状态').props.onClick(); await flush();
+  html = view.html();
+  assert.equal(calls, 2);
+  assert.match(html, />可用</);
+  assert.doesNotMatch(html, /内容已变更，待重建|现有图谱与当前内容版本不一致/);
+
+  // 后台真正报告 STALE 时保留过期警告；随后排队也必须显示真实阶段，不能继续显示 READY。
+  status = 'STALE'; target = 3;
+  view.tick(10000); await flush();
+  html = view.html();
+  assert.match(html, /内容已变更，待重建/);
+  assert.match(html, /现有图谱与当前内容版本不一致/);
+  assert.match(html, /当前内容版本 3/);
+  assert.doesNotMatch(html, />可用</);
+  status = 'QUEUED';
+  view.button('刷新图谱状态').props.onClick(); await flush();
+  html = view.html();
+  assert.match(html, /等待构建/);
+  assert.doesNotMatch(html, /内容已变更，待重建|>可用</);
+  assert.equal(view.button('重建图谱').props.disabled, true);
+  view.unmount();
+
+  // 反向交错也必须保守：父列表已知内容 3 时，迟到的 READY 2 不能显示当前可用。
+  const newerParent = mount(async () => response('READY', {
+    built_for_revision: 2, target_content_revision: 2, graph_generation: 1,
+  }), true, 3);
+  newerParent.html(); newerParent.tick(0); await flush();
+  const outdatedGraph = newerParent.html();
+  assert.match(outdatedGraph, /当前内容版本 3/);
+  assert.match(outdatedGraph, /已构建内容版本 2/);
+  assert.match(outdatedGraph, /内容已变更，待重建/);
+  assert.doesNotMatch(outdatedGraph, />可用</);
+  newerParent.unmount();
 });
 
 test('reports unavailable capability and read errors without allowing a build', async () => {
