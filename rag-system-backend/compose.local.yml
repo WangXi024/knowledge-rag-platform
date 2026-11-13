@@ -32,6 +32,9 @@ x-rag-app-common: &rag-app-common
     RAGFLOW_EMBEDDING_MODEL: ${RAGFLOW_EMBEDDING_MODEL}
     RAGFLOW_VISION_MODEL: ${RAGFLOW_VISION_MODEL}
     RAGFLOW_VISION_RUNTIME_MODEL: ${RAGFLOW_VISION_RUNTIME_MODEL}
+    # 图谱模型密钥仅留给显式 Bootstrap；业务进程只获得开关和已注册引用。
+    RAGFLOW_GRAPH_ENABLED: ${RAGFLOW_GRAPH_ENABLED:-false}
+    RAGFLOW_GRAPH_CHAT_MODEL_REF: ${RAGFLOW_GRAPH_CHAT_MODEL_REF:-}
     LLM_BASE_URL: ${LLM_BASE_URL}
     # 每项模型能力只读取自己的通用三元组。用户可以为多项能力填写同一个兼容端点
     # 和 Key，也可以分别使用不同供应商；真实值只保存在 Git 忽略环境中。

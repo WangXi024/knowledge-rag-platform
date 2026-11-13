@@ -37,6 +37,8 @@ class RuntimePreflightResult:
     ragflow: str
     ragflow_api_key: str
     rerank: str
+    graph: str = "disabled"
+    graph_chat_model: str | None = None
 
 
 class RuntimeDependencyPreflight:
@@ -252,6 +254,14 @@ class RuntimeDependencyPreflight:
         ):
             raise RagFlowError.invalid_response()
 
+        # 图谱 Chat 的真实调用由管理员模型 Bootstrap 验证；业务启动仅验证 RAGFlow
+        # 租户仍绑定同一个已注册引用，绝不把 Gateway 的 Chat 可用性当成构图凭据。
+        graph_status = "disabled"
+        if self._settings.ragflow.graph_enabled:
+            if configured_models.get("llm_id") != self._settings.ragflow.graph_chat_model:
+                raise RagFlowError.invalid_response()
+            graph_status = "enabled_model_registered"
+
         return RuntimePreflightResult(
             model_api="ok",
             chat_model=self._settings.models.llm.model,
@@ -263,6 +273,12 @@ class RuntimeDependencyPreflight:
             ragflow="ok",
             ragflow_api_key="ok",
             rerank=rerank_status,
+            graph=graph_status,
+            graph_chat_model=(
+                self._settings.ragflow.graph_chat_model
+                if self._settings.ragflow.graph_enabled
+                else None
+            ),
         )
 
     async def _check_media_completion(self) -> None:

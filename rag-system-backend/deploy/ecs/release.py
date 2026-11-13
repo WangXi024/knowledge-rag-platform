@@ -50,6 +50,17 @@ def validate_environment(mode: str) -> None:
             "RAGFLOW_API_KEY EMBEDDING_BASE_URL EMBEDDING_API_KEY EMBEDDING_MODEL "
             "LLM_BASE_URL LLM_API_KEY LLM_MODEL VISION_BASE_URL VISION_API_KEY VISION_MODEL".split()
         )
+        # 图谱模型凭据只在显式登记阶段要求；日常发布只需登记后的非敏感引用。
+        graph_flag = os.environ.get("RAGFLOW_GRAPH_ENABLED", "false")
+        if graph_flag not in {"true", "false"}:
+            raise ReleaseError("invalid boolean configuration: RAGFLOW_GRAPH_ENABLED")
+        if graph_flag == "true":
+            required.update(
+                "RAGFLOW_GRAPH_CHAT_BASE_URL RAGFLOW_GRAPH_CHAT_API_KEY "
+                "RAGFLOW_GRAPH_CHAT_MODEL".split()
+                if mode == "bootstrap-models"
+                else ["RAGFLOW_GRAPH_CHAT_MODEL_REF"]
+            )
     if mode == "release":
         required.update(
             "APP_REDIS_URL CACHE_REDIS_URL EMBEDDING_DIMENSION RAGFLOW_EMBEDDING_MODEL "
@@ -131,6 +142,7 @@ def save_configuration(path: Path, replacements: dict[str, str]) -> None:
         "RAGFLOW_EMBEDDING_MODEL",
         "RAGFLOW_VISION_MODEL",
         "RAGFLOW_VISION_RUNTIME_MODEL",
+        "RAGFLOW_GRAPH_CHAT_MODEL_REF",
         "LLM_OMIT_SAMPLING_PARAMETERS",
         "LLM_MAX_OUTPUT_TOKENS_FIELD",
         "LLM_EXTRA_BODY_JSON",
@@ -146,10 +158,17 @@ def save_configuration(path: Path, replacements: dict[str, str]) -> None:
 
 
 def bootstrap(directory: Path, mode: str, config_file: Path) -> None:
-    """对已启动的首次 RAGFlow 执行官方账号或模型配置，秘密仅在父子进程间传递。"""
+    """执行显式模型/账号管理；图谱凭据仅按变量名传给本次进程，不落常驻容器。"""
     validate_configuration_file(config_file)
     base = ["docker", "compose", "--project-name", PROJECT, "-f", str(directory / "compose.yml")]
     request_text = None
+    graph_environment: list[str] = []
+    if mode == "bootstrap-models" and os.environ.get("RAGFLOW_GRAPH_ENABLED") == "true":
+        # Compose 只接收变量名，从管理员进程环境读取值；命令参数与日志中没有密钥。
+        for name in (
+            "RAGFLOW_GRAPH_CHAT_BASE_URL", "RAGFLOW_GRAPH_CHAT_API_KEY", "RAGFLOW_GRAPH_CHAT_MODEL"
+        ):
+            graph_environment.extend(("--env", name))
     if mode == "bootstrap-account":
         request = json.load(sys.stdin)
         encrypted = run(
@@ -172,6 +191,7 @@ def bootstrap(directory: Path, mode: str, config_file: Path) -> None:
             "--rm",
             "--no-deps",
             "-T",
+            *graph_environment,
             "rag-app-bootstrap",
             "python",
             "-m",

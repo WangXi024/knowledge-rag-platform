@@ -6,7 +6,7 @@
 1. 对 Embedding 执行单条和批量请求，读取并验证真实维度；
 2. 对最终回答 LLM 执行普通回答与 JSON Object 请求，有限探测协议差异；
 3. 对 Vision 模型执行合成图片 OCR 请求；
-4. 通过 RAGFlow v0.26.4 的公开 Provider API 注册 Embedding 与 Vision；
+4. 通过 RAGFlow v0.26.4 的公开 Provider API 注册 Embedding、Vision，以及显式开启的图谱 Chat；
 5. 原子写回非敏感探测结果，供 Gateway、Worker 和后续启动预检使用。
 
 Rerank 的 ``/rerank`` 和 ASR 的 ``input_audio`` 不是 OpenAI 官方统一标准，仍由运行时
@@ -24,7 +24,7 @@ import re
 import struct
 import tempfile
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +72,33 @@ class CloudModelContract:
     vision_api_key: str
     vision_model: str
     provider: str = _RAGFLOW_GENERIC_PROVIDER
+    # 图谱模型独立登记；关闭能力时不要求这些字段，也不会从 Gateway 隐式复制。
+    graph_enabled: bool = False
+    graph_chat_base_url: str = ""
+    graph_chat_api_key: str = field(default="", repr=False)
+    graph_chat_model: str = ""
+
+    def __post_init__(self) -> None:
+        """拒绝开启图谱却缺少显式三元组的契约，错误不包含任何配置值。"""
+        if self.graph_enabled and not all(
+            value.strip()
+            for value in (self.graph_chat_base_url, self.graph_chat_api_key, self.graph_chat_model)
+        ):
+            raise BootstrapFailure(
+                "enabled graph requires an explicit Graph Chat URL, key and model"
+            )
+
+    @property
+    def graph_chat_instance(self) -> str:
+        """返回职责隔离的图谱 Chat 实例名；同模型用作 Gateway 时也不共享登记状态。"""
+        return _instance_name("graph-chat", self.graph_chat_base_url, self.graph_chat_model)
+
+    @property
+    def graph_chat_ref(self) -> str:
+        """只在启用时返回非敏感模型引用，关闭后清空过期引用以免误报能力。"""
+        if not self.graph_enabled:
+            return ""
+        return f"{self.graph_chat_model}@{self.graph_chat_instance}@{self.provider}"
 
     @property
     def embedding_instance(self) -> str:
@@ -103,7 +130,11 @@ def _required_env(name: str) -> str:
 
 
 def _contract() -> CloudModelContract:
-    """从环境构造通用职责，不检查供应商域名、Key 前缀或特定模型名称。"""
+    """读取显式模型职责；图谱关闭时不读取其凭据，开启时缺项会在联网前失败。"""
+    graph_flag = os.getenv("RAGFLOW_GRAPH_ENABLED", "false").strip().lower()
+    if graph_flag not in {"true", "false"}:
+        raise BootstrapFailure("RAGFLOW_GRAPH_ENABLED must be true or false")
+    graph_enabled = graph_flag == "true"
     return CloudModelContract(
         ragflow_base_url=os.getenv("RAGFLOW_BASE_URL", "http://127.0.0.1:9380").strip(),
         ragflow_api_key=_required_env("RAGFLOW_API_KEY"),
@@ -117,6 +148,10 @@ def _contract() -> CloudModelContract:
         vision_base_url=_required_env("VISION_BASE_URL"),
         vision_api_key=_required_env("VISION_API_KEY"),
         vision_model=_required_env("VISION_MODEL"),
+        graph_enabled=graph_enabled,
+        graph_chat_base_url=_required_env("RAGFLOW_GRAPH_CHAT_BASE_URL") if graph_enabled else "",
+        graph_chat_api_key=_required_env("RAGFLOW_GRAPH_CHAT_API_KEY") if graph_enabled else "",
+        graph_chat_model=_required_env("RAGFLOW_GRAPH_CHAT_MODEL") if graph_enabled else "",
     )
 
 
@@ -354,6 +389,67 @@ def _probe_chat(
     raise BootstrapFailure(f"no supported chat compatibility profile: {last_error}")
 
 
+def validate_graph_chat_model(
+    contract: CloudModelContract,
+    evidence: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+) -> None:
+    """用合成关系验证原生 GraphRAG 所需标准 Chat 协议，成功仅记录模型名。
+
+    图谱关闭时不创建客户端、不产生费用。开启后使用独立三元组发送标准请求，不
+    继承 Gateway 的协议补丁；原生驱动若不能直接调用该模型，应在构图前明确失败。
+    输出必须是含实体及显式关系的 JSON 对象；此处不写 RAGFlow 或业务数据库。
+    """
+    if not contract.graph_enabled:
+        return
+    owns_client = client is None
+    client = client or httpx.Client(
+        base_url=contract.graph_chat_base_url.rstrip("/") + "/",
+        headers={"Authorization": f"Bearer {contract.graph_chat_api_key}"},
+        timeout=httpx.Timeout(connect=10, read=180, write=60, pool=10),
+        trust_env=False,
+    )
+    try:
+        response = client.post(
+            "chat/completions",
+            headers={"Authorization": f"Bearer {contract.graph_chat_api_key}"},
+            json={
+                "model": contract.graph_chat_model,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "SyntheticA depends on SyntheticB. Extract only that explicit relation. "
+                        "Return exactly this JSON object, without Markdown: "
+                        '{"subject":"SyntheticA","predicate":"depends_on","object":"SyntheticB"}'
+                    ),
+                }],
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "stream": False,
+            },
+        )
+        extracted = json.loads(_assistant_content(_json(response, "graph_chat"), "graph_chat"))
+        if extracted != {
+            "subject": "SyntheticA", "predicate": "depends_on", "object": "SyntheticB"
+        }:
+            raise BootstrapFailure("graph Chat did not return the synthetic explicit relation")
+    except (httpx.HTTPError, BootstrapFailure, ValueError):
+        # 下游失败信息可能回显凭据或业务内容；图谱探测只输出固定、可操作的原因。
+        raise BootstrapFailure(
+            "graph_chat: standard Chat Completions relation probe failed; "
+            "check the explicit Graph Chat model and protocol"
+        ) from None
+    finally:
+        if owns_client:
+            client.close()
+    evidence["steps"].append({
+        "operation": "graph_chat", "result": "ok", "model": contract.graph_chat_model,
+        "explicit_relation_probe": True,
+    })
+
+
 def validate_cloud_models(
     contract: CloudModelContract,
     evidence: dict[str, Any],
@@ -361,8 +457,9 @@ def validate_cloud_models(
     embedding_client: httpx.Client | None = None,
     llm_client: httpx.Client | None = None,
     vision_client: httpx.Client | None = None,
+    graph_chat_client: httpx.Client | None = None,
 ) -> tuple[int, ChatCompatibility]:
-    """真实验证通用 Embedding、LLM 和 Vision，并返回探测结果。"""
+    """验证基础模型与可选图谱 Chat；默认关闭图谱时保持原有请求与启动要求。"""
     timeout = httpx.Timeout(connect=10, read=180, write=60, pool=10)
     owns_embedding = embedding_client is None
     embedding_client = embedding_client or httpx.Client(
@@ -508,6 +605,7 @@ def validate_cloud_models(
     finally:
         if owns_vision:
             vision_client.close()
+    validate_graph_chat_model(contract, evidence, client=graph_chat_client)
     return dimension, compatibility
 
 
@@ -640,7 +738,7 @@ def ensure_ragflow_models(
     *,
     ragflow_client: httpx.Client | None = None,
 ) -> None:
-    """注册通用 Embedding/Vision、设置租户默认值并回读验证。
+    """注册基础模型及显式启用的图谱 Chat，设置租户默认值并回读验证。
 
     固定镜像 v0.26.4 使用 ``image2text`` 表示可接收图片的模型能力，但 Provider
     实例验证器遗漏了这一分支。视觉模型因此先用 ``chat`` 完成实例验证，再通过官方
@@ -684,12 +782,30 @@ def ensure_ragflow_models(
             extra={"managed_by": "lazytt-rag-bootstrap", "capability": "ocr"},
             verification_model_type="chat",
         )
+        if contract.graph_enabled:
+            # GraphRAG 使用租户默认 Chat，而不是 Gateway 自己的客户端。独立登记
+            # chat 类型和职责实例，防止视觉验证时的临时 chat 记录被误当成构图模型。
+            try:
+                _ensure_instance_model(
+                    client,
+                    provider=contract.provider,
+                    instance=contract.graph_chat_instance,
+                    api_key=contract.graph_chat_api_key,
+                    base_url=contract.graph_chat_base_url,
+                    model=contract.graph_chat_model,
+                    model_type="chat",
+                    max_tokens=32768,
+                    extra={"managed_by": "lazytt-rag-bootstrap", "capability": "graph-chat"},
+                )
+            except (BootstrapFailure, httpx.HTTPError):
+                raise BootstrapFailure("ragflow_graph_chat: model registration failed") from None
         tenant = _ragflow_data(client.get("/api/v1/users/me/models"), "get_tenant_models")
         if not isinstance(tenant, dict) or not tenant.get("tenant_id"):
             raise BootstrapFailure("get_tenant_models: tenant information is missing")
         if (
             tenant.get("embd_id") != contract.embedding_ref
             or tenant.get("img2txt_id") != contract.vision_ref
+            or (contract.graph_enabled and tenant.get("llm_id") != contract.graph_chat_ref)
         ):
             _ragflow_data(
                 client.patch(
@@ -699,7 +815,11 @@ def ensure_ragflow_models(
                         "asr_id": tenant.get("asr_id") or "",
                         "embd_id": contract.embedding_ref,
                         "img2txt_id": contract.vision_ref,
-                        "llm_id": tenant.get("llm_id") or "",
+                        "llm_id": (
+                            contract.graph_chat_ref
+                            if contract.graph_enabled
+                            else tenant.get("llm_id") or ""
+                        ),
                     },
                 ),
                 "set_default_models",
@@ -710,6 +830,7 @@ def ensure_ragflow_models(
         if not isinstance(persisted, dict) or (
             persisted.get("embd_id") != contract.embedding_ref
             or persisted.get("img2txt_id") != contract.vision_ref
+            or (contract.graph_enabled and persisted.get("llm_id") != contract.graph_chat_ref)
         ):
             raise BootstrapFailure("RAGFlow did not persist the model defaults")
     finally:
@@ -731,6 +852,11 @@ def ensure_ragflow_models(
             },
         ]
     )
+    if contract.graph_enabled:
+        evidence["steps"].append({
+            "operation": "ragflow_graph_chat", "result": "ok", "model": contract.graph_chat_ref,
+            "default_chat": True,
+        })
 
 
 def _atomic_update_env(path: Path, replacements: dict[str, str]) -> None:
@@ -777,12 +903,13 @@ def _persist_results(
     dimension: int,
     compatibility: ChatCompatibility,
 ) -> None:
-    """把同一组已验证结果写入源环境和当前运行环境。"""
+    """只写回非敏感兼容结果；图谱关闭时清空旧引用，不复制任何图谱凭据。"""
     replacements = {
         "EMBEDDING_DIMENSION": str(dimension),
         "RAGFLOW_EMBEDDING_MODEL": contract.embedding_ref,
         "RAGFLOW_VISION_RUNTIME_MODEL": contract.vision_model,
         "RAGFLOW_VISION_MODEL": contract.vision_ref,
+        "RAGFLOW_GRAPH_CHAT_MODEL_REF": contract.graph_chat_ref,
         "LLM_OMIT_SAMPLING_PARAMETERS": str(
             compatibility.omit_sampling_parameters
         ).lower(),
@@ -813,6 +940,8 @@ def run(*, source_env: Path | None = None, runtime_env: Path | None = None) -> d
             "embedding_model_ref": contract.embedding_ref,
             "embedding_dimension": dimension,
             "vision_model_ref": contract.vision_ref,
+            "graph_enabled": contract.graph_enabled,
+            "graph_chat_model_ref": contract.graph_chat_ref or None,
             "llm_model": contract.llm_model,
             "configuration_persisted": bool(paths),
             "result": "ok",

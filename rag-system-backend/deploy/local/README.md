@@ -431,3 +431,16 @@ Worker 在上传 RAGFlow 前把静态图片无损包装为单页 PDF，不缩放
 重新构建本地应用镜像并运行 `bootstrap all` 导入新策略后，重建 Gateway/Worker/Scheduler
 使其读取新配置；使用正常 `./deploy/local/start-full.sh` 也会完成这些步骤。
 已有图片切换到该策略需要重新上传；已使用该策略的图片可以正常重解析。
+
+### 原生 GraphRAG 的模型准备
+
+图谱能力默认关闭。启用时在 Git 忽略的 `deploy/local/.env.ragflow` 中设置
+`RAGFLOW_GRAPH_ENABLED=true`，并显式填写 `RAGFLOW_GRAPH_CHAT_BASE_URL`、
+`RAGFLOW_GRAPH_CHAT_API_KEY`、`RAGFLOW_GRAPH_CHAT_MODEL`。即使与 Gateway 使用同一模型，
+也需要分别填写；生成器不会复制凭据。保持关闭时无需添加任何模型配置。
+
+下次按正常 `start-full.sh` 流程执行时，宿主机模型 Bootstrap 会用合成关系实际调用
+标准 Chat Completions，登记 RAGFlow 独立 Chat 实例并设置租户默认 `llm_id`。
+探测会产生模型调用费用；供应商必须支持该标准协议。成功后自动写回非敏感的
+`RAGFLOW_GRAPH_CHAT_MODEL_REF`，业务容器只接收此引用和图谱开关，不接收图谱三元组。
+模型登记成功只说明模型可用，知识库的启用与构建状态以管理接口为准。

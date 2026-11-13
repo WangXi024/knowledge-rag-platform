@@ -52,6 +52,9 @@ ragflow:
   vision_runtime_model_env: RAGFLOW_VISION_RUNTIME_MODEL
   embedding_dimension_env: EMBEDDING_DIMENSION
   contract_version: v0.26.4
+  # 只有完成独立图谱 Chat 模型注册后才开启；业务进程不读取其 URL 或密钥。
+  graph_enabled_env: RAGFLOW_GRAPH_ENABLED
+  graph_chat_model_env: RAGFLOW_GRAPH_CHAT_MODEL_REF
   connect_timeout_seconds: 3
   read_timeout_seconds: 30
   upload_timeout_seconds: 300

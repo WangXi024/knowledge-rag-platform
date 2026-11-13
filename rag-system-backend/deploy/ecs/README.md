@@ -248,6 +248,14 @@ sudo bash /opt/lazytt/lazytt-rag-system/administrator/58153ebc9caf/account.sh '<
 其他首次环境完成账号后，由部署执行人继续正式 `bootstrap-models`、关闭注册及同候选 release。
 模型调用、五个服务健康、业务和恢复验收分别记录，不能以账号成功代替部署完成。
 
+可选原生图谱默认关闭。需要启用时，在管理员私有环境中显式设置
+`RAGFLOW_GRAPH_ENABLED=true` 及独立的 `RAGFLOW_GRAPH_CHAT_BASE_URL`、
+`RAGFLOW_GRAPH_CHAT_API_KEY`、`RAGFLOW_GRAPH_CHAT_MODEL`，然后执行已有的
+`bootstrap-models` 步骤。它会进行标准 Chat Completions 合成关系探测并登记默认 Chat，
+产生模型调用费用；不会借用 Gateway 凭据。三元组仅通过 `--env` 变量名传给该次
+Bootstrap，普通发布只消费成功后写回的 `RAGFLOW_GRAPH_CHAT_MODEL_REF`。
+模型登记不等同于知识库已经构图，仍需通过管理接口启用并查看构建状态。
+
 本次运行验收：Gateway `19580` readiness 与 RAGFlow `19581` healthz 均为 200，
 缺失或空 Tenant/User Header 返回 `400 / RAG-COMMON-001`。空闲状态下重启五个服务后，
 两个健康接口恢复，30 条配置记录快照不变；不代表带业务任务的恢复。RAGFlow API Key

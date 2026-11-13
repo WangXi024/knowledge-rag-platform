@@ -91,7 +91,7 @@ class RedisSection(StrictModel):
 
 
 class RagFlowSection(StrictModel):
-    """RAGFlow 地址、凭据、模型契约及不同操作的超时/重试限制。"""
+    """RAGFlow 地址、模型引用和操作边界；图谱 Chat 密钥只由模型 Bootstrap 消费。"""
     base_url: str
     api_key: str
     embedding_model: str
@@ -99,11 +99,27 @@ class RagFlowSection(StrictModel):
     vision_runtime_model: str
     embedding_dimension: PositiveInt
     contract_version: str = "v0.26.4"
+    # 默认关闭原生图谱。业务进程只接收已注册模型引用，不隐式复用 Gateway 的模型密钥。
+    graph_enabled: bool = False
+    graph_chat_model: str | None = None
     connect_timeout_seconds: PositiveInt = 3
     read_timeout_seconds: PositiveInt = 30
     upload_timeout_seconds: PositiveInt = 300
     retrieval_timeout_seconds: PositiveInt = 8
     max_attempts: PositiveInt = 2
+
+    @model_validator(mode="after")
+    def validate_graph_chat_reference(self) -> RagFlowSection:
+        """图谱开启时要求真实登记的 Chat 引用，防止空配置或初始化占位值进入任务。"""
+        if self.graph_enabled and (
+            not self.graph_chat_model
+            or not self.graph_chat_model.strip()
+            or self.graph_chat_model.startswith(("pending-", "change-me"))
+        ):
+            raise ValueError(
+                "enabled RAGFlow graph requires a registered graph Chat model reference"
+            )
+        return self
 
 
 class UploadSection(StrictModel):
@@ -605,6 +621,10 @@ def load_settings(path: Path | None = None) -> ServiceSettings:
             vision_runtime_model=_required_env(ragflow_raw["vision_runtime_model_env"]),
             embedding_dimension=int(_required_env(ragflow_raw["embedding_dimension_env"])),
             contract_version=ragflow_raw["contract_version"],
+            graph_enabled=_bool_env(ragflow_raw.get("graph_enabled_env", "RAGFLOW_GRAPH_ENABLED")),
+            graph_chat_model=_optional_env(
+                ragflow_raw.get("graph_chat_model_env", "RAGFLOW_GRAPH_CHAT_MODEL_REF")
+            ),
             connect_timeout_seconds=ragflow_raw["connect_timeout_seconds"],
             read_timeout_seconds=ragflow_raw["read_timeout_seconds"],
             upload_timeout_seconds=ragflow_raw["upload_timeout_seconds"],
