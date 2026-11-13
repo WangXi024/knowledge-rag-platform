@@ -218,6 +218,8 @@ async def test_success_publishes_generation_without_changing_content_revision(
     state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
     assert state.status == GraphStatus.READY
     assert state.graph_generation == 1 and state.built_for_revision == 3
+    # 完成后的更新时间必须覆盖发布时刻，不能一直停留在最初排队时间。
+    assert state.completed_at is not None and state.updated_at >= state.completed_at
     assert resources.kb.revision == 3 and engine.build_count == 1
     assert job.status == JobStatus.SUCCEEDED
 

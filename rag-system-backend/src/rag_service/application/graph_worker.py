@@ -293,7 +293,9 @@ class GraphWorker:
         return state if state is not None and state.job_id == job.id else None
 
     async def _save(self, state: GraphState) -> None:
-        """仅保存读取时的行版本，数据库冲突交由有限重试处理。"""
+        """保存读取时的行版本及实际变更时间，数据库冲突交由有限重试处理。"""
+        # 管理端轮询需要区分真实状态变更时间和最初排队时间，发布/失败也必须刷新。
+        state.updated_at = utc_now()
         if not await self._graphs.update(
             state.security_scope_id, state, expected_row_version=state.row_version
         ):
