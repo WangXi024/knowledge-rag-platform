@@ -112,12 +112,17 @@ class GraphService:
             pass
         elif not configuration.enabled:
             state.status = GraphStatus.DISABLED
-        elif changed_build_policy or state.built_for_revision != kb.revision:
+        elif (
+            state.status == GraphStatus.DISABLED
+            or changed_build_policy
+            or state.built_for_revision != kb.revision
+        ):
             state.status = (
                 GraphStatus.NOT_BUILT if state.graph_generation == 0 else GraphStatus.STALE
             )
-        else:
-            state.status = GraphStatus.READY
+        # 其他状态保持原值：built_for_revision 只证明上次成功构建采用的内容版本，
+        # 不能证明失败/取消后的引擎产物仍完整。查询开关不能把 FAILED/STALE 升为
+        # READY；停用后重新启用也须重建，只有 Worker 的成功发布才能重新确认为可用。
         await self._save(state, expected)
         if (
             configuration.enabled
@@ -203,17 +208,31 @@ class GraphService:
     async def content_changed(
         self, security_scope_id: str, knowledge_base_id: UUID, *, auto_build: bool = True
     ) -> None:
-        """内容事务调用的失效钩子；批量上传期间在途任务合并，后续再按最新快照重建。"""
+        """在内容事务内推进目标修订及行版本，阻止旧构图跨过并发内容提交发布。
+
+        在途任务仍属于原 Job，不覆盖已经提交给引擎的 payload 快照；本行的最新
+        目标修订用于记录后继需求，CAS 则让发布读取之后发生的内容变更可被检测。
+        """
         state = await self._graphs.get(security_scope_id, knowledge_base_id)
         if state is None or not state.configuration.enabled:
             return
-        if state.status not in IN_FLIGHT:
-            expected = state.row_version
+        kb = await self._knowledge_bases.get(security_scope_id, knowledge_base_id)
+        if kb is None:
+            raise ResourceNotFoundError("RAG-KB-001", "知识库不存在")
+        expected = state.row_version
+        in_flight = state.status in IN_FLIGHT
+        state.target_content_revision = kb.revision
+        state.updated_at = utc_now()
+        if not in_flight:
             state.status = GraphStatus.STALE
-            state.updated_at = utc_now()
-            await self._save(state, expected)
-            if auto_build and state.configuration.auto_build and self._enabled and self._model_ref:
-                await self.enqueue(security_scope_id, knowledge_base_id)
+        # 即使 revision 尚未递增（例如摄取刚开始），也要推进版本：物理来源集合
+        # 可能已经变化，旧发布必须重新执行来源核验，而不能靠旧 READY 快照通过。
+        await self._save(state, expected)
+        if (
+            not in_flight and auto_build and state.configuration.auto_build
+            and self._enabled and self._model_ref
+        ):
+            await self.enqueue(security_scope_id, knowledge_base_id)
 
     async def stop_for_deletion(self, security_scope_id: str, knowledge_base_id: UUID) -> None:
         """删除事务先停用派生索引，运行中的旧任务只能取消而不能迟到发布。"""

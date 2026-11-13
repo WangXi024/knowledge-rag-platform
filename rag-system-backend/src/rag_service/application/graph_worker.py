@@ -164,35 +164,56 @@ class GraphWorker:
             task = observed
 
     async def _publish(self, job: IngestionJob, state: GraphState, generation: int) -> None:
-        """二次验证来源后发布新代数；内容变化时只保存过期状态并安排最新快照。"""
-        # snapshot 适配器会重新核对 Dataset 的全部物理 ID 与本地活动文档边界。
-        await self._engine.snapshot(job.security_scope_id, state.knowledge_base_id, generation)
-        kb = await self._knowledge_bases.get(job.security_scope_id, state.knowledge_base_id)
-        refreshed = await self._state(job)
-        if kb is None or kb.status != KnowledgeBaseStatus.READY or refreshed is None:
-            await self._finish(job, JobStatus.CANCELLED)
-            return
-        state = refreshed
-        current_job = await self._jobs.get(job.security_scope_id, job.id)
-        if (
-            state.status == GraphStatus.CANCELLING
-            or not state.configuration.enabled
-            or (current_job is not None and current_job.status == JobStatus.CANCEL_REQUESTED)
-        ):
-            await self._cancel(job, state)
-            return
-        publishable = (
-            state.configuration.enabled
-            and kb.revision == job.payload.get("content_revision")
-            # 检索开关改变不使已经付费的图过期；不可变构图策略引用才是构建身份。
-            and state.configuration.profile_ref == job.payload.get("profile_ref")
-        )
-        state.status = GraphStatus.READY if publishable else GraphStatus.STALE
-        if publishable:
-            state.graph_generation = generation
-            state.built_for_revision = kb.revision
-        state.completed_at = utc_now()
-        await self._save(state)
+        """核验来源后以 CAS 发布；并发内容提交只重试发布，不再收费构图。
+
+        读取内容号之后仍可能有摄取提交，content_changed 必须同步推进图谱行版本。
+        此类冲突在当前阶段最多回滚、复核三次，不额外消耗 Job attempt。少量并发
+        即使发生在最后一次 attempt 也能收敛；持续竞争则交回既有有限任务重试，
+        耗尽后明确 FAILED、允许人工重试，不能无限占用 Worker。
+        """
+        for publication_attempt in range(3):
+            # 每次 CAS 冲突后都重新验证全部物理来源，不能只刷新内容号而复用旧快照。
+            await self._engine.snapshot(job.security_scope_id, state.knowledge_base_id, generation)
+            kb = await self._knowledge_bases.get(job.security_scope_id, state.knowledge_base_id)
+            refreshed = await self._state(job)
+            if kb is None or kb.status != KnowledgeBaseStatus.READY or refreshed is None:
+                await self._finish(job, JobStatus.CANCELLED)
+                return
+            state = refreshed
+            current_job = await self._jobs.get(job.security_scope_id, job.id)
+            if (
+                state.status == GraphStatus.CANCELLING
+                or not state.configuration.enabled
+                or (current_job is not None and current_job.status == JobStatus.CANCEL_REQUESTED)
+            ):
+                await self._cancel(job, state)
+                return
+            publishable = (
+                state.configuration.enabled
+                and kb.revision == job.payload.get("content_revision")
+                # 内容事务也可能恰好提交在上面的 KB 读取与图谱行读取之间；最新目标
+                # 修订可以识别此时尚未过期的行版本，避免只靠 CAS 漏掉该交错窗口。
+                and state.target_content_revision == job.payload.get("content_revision")
+                # 检索开关改变不使已经付费的图过期；不可变构图策略引用才是构建身份。
+                and state.configuration.profile_ref == job.payload.get("profile_ref")
+            )
+            state.status = GraphStatus.READY if publishable else GraphStatus.STALE
+            if publishable:
+                state.graph_generation = generation
+                state.built_for_revision = kb.revision
+            state.completed_at = utc_now()
+            try:
+                await self._save(state)
+                break
+            except RagError as error:
+                if error.code != "RAG-GRAPH-005":
+                    raise
+                await self._rollback()
+                if publication_attempt == 2:
+                    raise
+                # 回滚释放图谱锁后再次验证当前 Job 租约。失去所有权或取消会沿既有
+                # 控制路径退出；这里只重试已完成任务的发布，不重复调用 build。
+                await self._checkpoint()
         job.result = {"graph_generation": state.graph_generation, "published": publishable}
         # 先在同一事务内将旧任务标为终态，释放唯一在途约束，再新增后继任务。
         # 中间不能提交，否则旧租约 guard 会拒绝新任务的检查点，造成永久 STALE。

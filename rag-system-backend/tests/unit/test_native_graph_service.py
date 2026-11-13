@@ -285,7 +285,9 @@ async def test_submitted_build_recovery_keeps_original_content_snapshot(graph_en
     job.attempt += 1
     await worker.execute(job)
     state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
-    assert state.target_content_revision == job.payload["content_revision"] == 3
+    # 状态行记录最新重建需求，已经提交的 Job 继续绑定旧快照，不能重定位收费任务。
+    assert state.target_content_revision == 4
+    assert job.payload["content_revision"] == 3
     assert state.status == GraphStatus.STALE and state.graph_generation == 0
     assert state.built_for_revision is None and engine.build_count == len(resources.jobs) == 1
     assert job.status == JobStatus.SUCCEEDED and job.result["published"] is False
@@ -563,3 +565,272 @@ async def test_query_switch_during_build_does_not_discard_completed_graph(graph_
     assert state.status == GraphStatus.READY and not state.configuration.retrieval_enabled
     assert job.status == JobStatus.SUCCEEDED
     assert len(resources.jobs) == engine.build_count == 1
+
+
+@pytest.mark.parametrize("auto_build", [False, True])
+async def test_query_switch_cannot_publish_a_failed_rebuild_from_previous_revision_marker(
+    graph_env: Any, auto_build: bool,
+) -> None:
+    """同内容重建失败仍保留上次成功修订号，切换检索开关不能据此重新发布 READY。
+
+    自动构建关闭时保持 FAILED；开启时只登记新的构建任务，必须再次通过 Worker
+    验收才能恢复 READY，不能把可能部分写入的引擎索引当成旧代数的完整产物。
+    """
+    security, resources, graphs, service, engine = graph_env
+    first = await enabled_job(graph_env, auto_build=auto_build)
+    worker = GraphWorker(resources, graphs, resources, engine, service)
+    await worker.execute(first)
+    rebuild = await service.build(security, resources.kb.id)
+    failed = resources.jobs[rebuild.job_id]
+    failed.status = JobStatus.RUNNING
+    failed.attempt = 1
+    engine.status = GraphStatus.FAILED
+    await worker.execute(failed)
+    previous = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert previous.status == GraphStatus.FAILED
+    assert previous.graph_generation == 1 and previous.built_for_revision == resources.kb.revision
+
+    configured = await service.configure(
+        security, resources.kb.id,
+        GraphConfiguration(
+            enabled=True, auto_build=auto_build, retrieval_enabled=False,
+        ),
+    )
+    assert configured.status == (GraphStatus.QUEUED if auto_build else GraphStatus.FAILED)
+    assert configured.graph_generation == 1
+    assert configured.built_for_revision == resources.kb.revision
+    assert len(resources.jobs) == 2 + int(auto_build)
+    assert engine.build_count == 2
+
+
+async def test_query_switch_preserves_stale_state_even_when_content_revision_matches(
+    graph_env: Any,
+) -> None:
+    """取消或保守失效后的 STALE 不代表内容号变化，检索开关也不能绕过重新构建。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    graphs.items[resources.kb.security_scope_id, resources.kb.id].status = GraphStatus.STALE
+
+    state = await service.configure(
+        security, resources.kb.id,
+        GraphConfiguration(enabled=True, auto_build=False, retrieval_enabled=False),
+    )
+    assert state.status == GraphStatus.STALE
+    assert state.built_for_revision == resources.kb.revision and state.graph_generation == 1
+    assert len(resources.jobs) == engine.build_count == 1
+
+
+@pytest.mark.parametrize("had_successful_graph", [False, True])
+async def test_reenable_requires_build_instead_of_reusing_unverified_engine_artifacts(
+    graph_env: Any, had_successful_graph: bool,
+) -> None:
+    """停用后重新启用保持未构建或过期；历史成功修订号不能替代当前引擎验收。"""
+    security, resources, graphs, service, engine = graph_env
+    if had_successful_graph:
+        job = await enabled_job(graph_env)
+        await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    await service.configure(
+        security, resources.kb.id, GraphConfiguration(enabled=False, auto_build=False),
+    )
+    state = await service.configure(
+        security, resources.kb.id, GraphConfiguration(enabled=True, auto_build=False),
+    )
+    assert state.status == (GraphStatus.STALE if had_successful_graph else GraphStatus.NOT_BUILT)
+    assert state.graph_generation == int(had_successful_graph)
+    assert len(resources.jobs) == engine.build_count == int(had_successful_graph)
+
+
+@pytest.mark.parametrize(
+    "status", [GraphStatus.QUEUED, GraphStatus.BUILDING, GraphStatus.CANCELLING]
+)
+@pytest.mark.parametrize("revision_delta", [0, 1])
+async def test_content_change_advances_inflight_cas_without_rewriting_submitted_job_snapshot(
+    graph_env: Any, status: GraphStatus, revision_delta: int,
+) -> None:
+    """排队、构建和取消中的内容事件也推进行版本，保留原任务身份及已提交快照。
+
+    revision 不变代表摄取刚启动、活动物理集合可能变化；它同样必须使旧发布重新
+    核验来源。目标修订用于后继调度，不覆盖已经用于原生任务的 Job payload。
+    """
+    _security, resources, graphs, service, _engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    job.payload["submission_started"] = True
+    stored = graphs.items[resources.kb.security_scope_id, resources.kb.id]
+    stored.status = status
+    previous_row_version = stored.row_version
+    submitted_payload = deepcopy(resources.jobs[job.id].payload)
+    resources.kb.revision += revision_delta
+
+    await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == status and state.job_id == job.id
+    assert state.row_version == previous_row_version + 1
+    assert state.target_content_revision == resources.kb.revision
+    assert resources.jobs[job.id].payload == submitted_payload
+    assert len(resources.jobs) == 1
+
+
+@pytest.mark.parametrize("change", ["content", "retrieval_switch"])
+@pytest.mark.parametrize("conflict_count", [1, 2])
+async def test_publish_cas_conflict_rolls_back_and_revalidates_without_another_paid_build(
+    graph_env: Any, change: str, conflict_count: int,
+) -> None:
+    """在发布已读取内容及图谱状态后提交并发事务，CAS 失败须局部恢复而非永久失败。
+
+    测试从最后一次 Job attempt 开始，故回退普通失败重试会直接 FAILED；只有在
+    发布阶段回滚、重新校验来源和重读状态，才能保留原生完成结果及必要的后继任务。
+    """
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    job.attempt = job.max_attempts
+    previous_revision = resources.kb.revision
+    original_update = graphs.update
+    changes = 0
+    rollbacks = 0
+    snapshots: list[int] = []
+
+    async def observe_snapshot() -> None:
+        """记录每次来源复核看到的内容修订，证明冲突后没有复用第一次来源快照。"""
+        snapshots.append(resources.kb.revision)
+
+    async def concurrent_commit_before_publish(
+        scope: str, value: GraphState, *, expected_row_version: int,
+    ) -> bool:
+        """在发布 CAS 即将执行时独立提交内容或查询开关，留下真实的旧行版本。"""
+        nonlocal changes
+        if value.status in {GraphStatus.READY, GraphStatus.STALE} and changes < conflict_count:
+            changes += 1
+            if value.status == GraphStatus.READY:
+                assert value.built_for_revision == previous_revision
+            if change == "content":
+                resources.kb.revision += 1
+                await service.content_changed(scope, resources.kb.id)
+            else:
+                current = await graphs.get(scope, resources.kb.id)
+                await service.configure(
+                    security, resources.kb.id,
+                    GraphConfiguration(
+                        enabled=True, auto_build=True,
+                        retrieval_enabled=not current.configuration.retrieval_enabled,
+                    ),
+                )
+            current = await graphs.get(scope, resources.kb.id)
+            assert current.status == GraphStatus.BUILDING
+            assert current.row_version > expected_row_version
+        return await original_update(scope, value, expected_row_version=expected_row_version)
+
+    async def rollback_failed_publish() -> None:
+        """模拟回滚当前失败的发布事务，已经独立提交的内容/配置事务必须保留。"""
+        nonlocal rollbacks
+        rollbacks += 1
+        state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+        assert state.status == GraphStatus.BUILDING
+        assert resources.jobs[job.id].status == JobStatus.RUNNING
+
+    async def guarded_checkpoint() -> None:
+        """最终检查点同时看到旧 Job 终态与必要的新 Job，防止后继被拆到丢租约事务。"""
+        if resources.jobs[job.id].status == JobStatus.SUCCEEDED and change == "content":
+            state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+            assert state.status == GraphStatus.QUEUED and state.job_id != job.id
+
+    graphs.update = concurrent_commit_before_publish
+    engine.on_snapshot = observe_snapshot
+    await GraphWorker(
+        resources, graphs, resources, engine, service,
+        checkpoint=guarded_checkpoint, rollback=rollback_failed_publish,
+    ).execute(job)
+
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert changes == rollbacks == conflict_count
+    assert snapshots == [
+        previous_revision + (index if change == "content" else 0)
+        for index in range(conflict_count + 1)
+    ]
+    assert job.status == JobStatus.SUCCEEDED and job.attempt == job.max_attempts
+    assert job.payload["content_revision"] == previous_revision
+    assert engine.build_count == 1
+    if change == "content":
+        assert state.status == GraphStatus.QUEUED
+        assert state.target_content_revision == resources.kb.revision
+        assert state.graph_generation == 0 and job.result["published"] is False
+        assert len(resources.jobs) == 2
+        assert resources.jobs[state.job_id].payload["content_revision"] == resources.kb.revision
+    else:
+        assert state.status == GraphStatus.READY
+        assert state.configuration.retrieval_enabled == (conflict_count % 2 == 0)
+        assert state.graph_generation == 1 and job.result["published"] is True
+        assert len(resources.jobs) == 1
+
+
+async def test_publish_observes_target_revision_when_content_commits_between_two_reads(
+    graph_env: Any,
+) -> None:
+    """内容提交位于 KB 与图谱行两次读取之间时，最新目标修订仍能阻止旧图发布。
+
+    此时 Worker 拿到旧 KB 快照、但图谱行已经是新行版本，单独 CAS 会成功；必须
+    同时比较 target_content_revision，才能识别旧内容并原子安排后继构建。
+    """
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    original_get = resources.get
+    final_snapshot_seen = False
+    changed = False
+
+    async def observe_final_snapshot() -> None:
+        """只在最终来源核验之后打开并发注入窗口，不影响首次提交时的内容快照。"""
+        nonlocal final_snapshot_seen
+        final_snapshot_seen = True
+
+    async def commit_after_knowledge_base_read(scope: str, identifier: UUID) -> Any:
+        """先获取旧内容号再提交独立内容变更，之后才让 Worker 读取最新图谱行。"""
+        nonlocal changed
+        result = await original_get(scope, identifier)
+        if final_snapshot_seen and identifier == resources.kb.id and not changed:
+            changed = True
+            resources.kb.revision += 1
+            await service.content_changed(scope, identifier)
+        return result
+
+    resources.get = commit_after_knowledge_base_read
+    engine.on_snapshot = observe_final_snapshot
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert changed and job.status == JobStatus.SUCCEEDED
+    assert job.result["published"] is False and state.graph_generation == 0
+    assert state.status == GraphStatus.QUEUED and len(resources.jobs) == 2
+    assert state.target_content_revision == resources.kb.revision
+    assert job.payload["content_revision"] < state.target_content_revision
+    assert engine.build_count == 1
+
+
+async def test_persistent_publish_cas_conflicts_stop_after_three_local_attempts(
+    graph_env: Any,
+) -> None:
+    """持续内容事件最多重试三次发布；任务额度耗尽明确失败，不能无限占用 Worker。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    job.attempt = job.max_attempts
+    original_update = graphs.update
+    publication_attempts = 0
+
+    async def keep_conflicting_with_publish(
+        scope: str, value: GraphState, *, expected_row_version: int,
+    ) -> bool:
+        """每次 READY CAS 前提交一次内容事件；只推进真实行版本，不伪造仓库失败。"""
+        nonlocal publication_attempts
+        if value.status == GraphStatus.READY:
+            publication_attempts += 1
+            await service.content_changed(scope, resources.kb.id, auto_build=False)
+        return await original_update(scope, value, expected_row_version=expected_row_version)
+
+    graphs.update = keep_conflicting_with_publish
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert publication_attempts == 3
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-005"
+    assert state.status == GraphStatus.FAILED and len(resources.jobs) == 1
+    assert engine.build_count == 1 and job.payload["submission_started"]
