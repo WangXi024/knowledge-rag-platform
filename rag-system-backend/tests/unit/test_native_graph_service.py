@@ -239,6 +239,58 @@ async def test_changed_content_cannot_publish_ready_and_auto_rebuilds_once(graph
     assert job.result["published"] is False
 
 
+async def test_queued_build_coalesces_latest_completed_content_before_submission(
+    graph_env: Any,
+) -> None:
+    """多份文档解析在提交前完成，刷新同一任务的快照且只付费构图一次。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, auto_build=True)
+    for revision in (4, 5):
+        resources.kb.revision = revision
+        await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+    assert len(resources.jobs) == 1 and job.payload["content_revision"] == 3
+    original_build = engine.build
+
+    async def verify_submission_checkpoint(
+        scope: str, kb_id: UUID, generation: int,
+    ) -> GraphTask:
+        """模型调用开始前，图谱目标与 Job 内容快照已共同保存。"""
+        current = await graphs.get(scope, kb_id)
+        stored_job = resources.jobs[job.id]
+        assert current.target_content_revision == 5
+        assert stored_job.payload["content_revision"] == 5
+        assert stored_job.payload["submission_started"]
+        return await original_build(scope, kb_id, generation)
+
+    engine.build = verify_submission_checkpoint
+    await GraphWorker(resources, graphs, resources, engine, service).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.READY and state.built_for_revision == 5
+    assert state.target_content_revision == job.payload["content_revision"] == 5
+    assert state.graph_generation == 1 and len(resources.jobs) == engine.build_count == 1
+    assert job.status == JobStatus.SUCCEEDED and job.result["published"] is True
+
+
+async def test_submitted_build_recovery_keeps_original_content_snapshot(graph_env: Any) -> None:
+    """已提交后内容变化，恢复只跟踪旧任务，不重定位快照或重复收费。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    engine.response_lost = True
+    worker = GraphWorker(resources, graphs, resources, engine, service)
+    await worker.execute(job)
+    assert job.status == JobStatus.RETRY_WAIT and job.payload["submission_started"]
+    resources.kb.revision = 4
+    await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+    job.status = JobStatus.RUNNING
+    job.attempt += 1
+    await worker.execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.target_content_revision == job.payload["content_revision"] == 3
+    assert state.status == GraphStatus.STALE and state.graph_generation == 0
+    assert state.built_for_revision is None and engine.build_count == len(resources.jobs) == 1
+    assert job.status == JobStatus.SUCCEEDED and job.result["published"] is False
+
+
 async def test_lost_submission_recovers_without_second_build(graph_env: Any) -> None:
     """提交响应超时后恢复到原生任务，不能重复构图计费。"""
     _security, resources, graphs, service, engine = graph_env
@@ -315,6 +367,94 @@ async def test_retrieval_switch_does_not_enqueue_another_paid_build(graph_env: A
     )
     assert state.status == GraphStatus.READY and state.graph_generation == 1
     assert len(resources.jobs) == engine.build_count == 1
+
+
+async def test_cancel_rejects_replaced_native_task_before_request(graph_env: Any) -> None:
+    """原生最新任务已更换时，不向后继任务发送取消，也不确认旧任务结束。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    job.payload["submission_started"] = True
+    graphs.items[resources.kb.security_scope_id, resources.kb.id].engine_task_id = "task-1"
+    await service.cancel(security, resources.kb.id)
+
+    async def replacement_task(scope: str, kb_id: UUID, generation: int) -> GraphTask:
+        """模拟同 Dataset 的后继原生任务仍在运行。"""
+        return GraphTask(scope, kb_id, generation, "task-2", GraphStatus.BUILDING, 0.5)
+
+    engine.task = replacement_task
+    await GraphWorker(
+        resources, graphs, resources, engine, service, timeout_seconds=0
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.CANCELLING and state.engine_task_id == "task-1"
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-007"
+    assert engine.cancel_count == engine.build_count == 0
+
+
+async def test_cancel_rejects_replaced_native_task_while_polling(graph_env: Any) -> None:
+    """取消等待期间出现后继任务的终态，不能将其当成旧任务已停止。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    job.payload["submission_started"] = True
+    graphs.items[resources.kb.security_scope_id, resources.kb.id].engine_task_id = "task-1"
+    await service.cancel(security, resources.kb.id)
+    observations = 0
+
+    async def replacement_during_poll(scope: str, kb_id: UUID, generation: int) -> GraphTask:
+        """先回读原任务，取消后回读到已结束的后继任务。"""
+        nonlocal observations
+        observations += 1
+        if observations == 1:
+            return GraphTask(scope, kb_id, generation, "task-1", GraphStatus.BUILDING, 0.5)
+        return GraphTask(scope, kb_id, generation, "task-2", GraphStatus.READY, 1.0)
+
+    async def immediate(_delay: float) -> None:
+        """跳过轮询间隔，不产生真实等待。"""
+        return None
+
+    engine.task = replacement_during_poll
+    await GraphWorker(
+        resources, graphs, resources, engine, service, sleep=immediate
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.CANCELLING and state.engine_task_id == "task-1"
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-007"
+    assert observations == 2 and engine.cancel_count == 1 and engine.build_count == 0
+
+
+@pytest.mark.parametrize("during_poll", [False, True])
+async def test_cancel_unknown_submission_never_uses_previous_task_terminal(
+    graph_env: Any, during_poll: bool,
+) -> None:
+    """提交响应丢失时，上次构建的终态不能证明本次构建已经停止。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env)
+    job.payload["submission_started"] = True
+    job.payload["previous_engine_task_id"] = "task-previous"
+    await service.cancel(security, resources.kb.id)
+    observations = 0
+
+    async def previous_task(scope: str, kb_id: UUID, generation: int) -> GraphTask:
+        """可在取消前或轮询期间回读到旧任务的完成记录。"""
+        nonlocal observations
+        observations += 1
+        if during_poll and observations == 1:
+            return GraphTask(scope, kb_id, generation, "task-1", GraphStatus.BUILDING, 0.5)
+        return GraphTask(scope, kb_id, generation, "task-previous", GraphStatus.READY, 1.0)
+
+    async def immediate(_delay: float) -> None:
+        """跳过轮询间隔，不产生真实等待。"""
+        return None
+
+    engine.task = previous_task
+    await GraphWorker(
+        resources, graphs, resources, engine, service, sleep=immediate
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.CANCELLING and state.engine_task_id is None
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-006"
+    assert observations == 1 + int(during_poll) and engine.cancel_count == int(during_poll)
+    assert engine.build_count == 0
 
 
 async def test_cancel_during_final_snapshot_never_auto_rebuilds(graph_env: Any) -> None:

@@ -87,6 +87,14 @@ class GraphWorker:
         generation = state.graph_generation + 1
         task: GraphTask | None
         if not job.payload.get("submission_started"):
+            kb = await self._knowledge_bases.get(job.security_scope_id, state.knowledge_base_id)
+            if kb is None or kb.status != KnowledgeBaseStatus.READY:
+                await self._finish(job, JobStatus.CANCELLED)
+                return
+            # 排队期间可合并多份解析结果；和提交标记一起持久化后才开始收费构图。
+            # 一旦 submission_started 已提交，恢复分支必须保留原内容快照。
+            state.target_content_revision = kb.revision
+            job.payload["content_revision"] = kb.revision
             # 原生参数的更新可重试；真正构图之前的持久化标记不允许省略。
             await self._engine.configure(
                 job.security_scope_id, state.knowledge_base_id, generation, state.configuration
@@ -207,6 +215,21 @@ class GraphWorker:
         await self._checkpoint()
         generation = state.graph_generation + 1
         task = await self._engine.task(job.security_scope_id, state.knowledge_base_id, generation)
+        if (
+            task is not None
+            and state.engine_task_id is None
+            and task.engine_task_id == job.payload.get("previous_engine_task_id")
+        ):
+            raise RagError(
+                "RAG-GRAPH-006", "无法确认原生构图提交结果，请核查后手动重试", 409, False
+            )
+        if (
+            task is not None
+            and state.engine_task_id is not None
+            and task.engine_task_id != state.engine_task_id
+        ):
+            # Dataset 只提供最新任务；不能误取消后继任务或借其终态确认旧任务停止。
+            raise RagError("RAG-GRAPH-007", "原生任务已被其他构建替换", 409, False)
         if task is None or task.status not in {GraphStatus.READY, GraphStatus.FAILED}:
             # 已结束的任务可直接确认停止，不能先DELETE掉唯一可观察的终态证据。
             await self._engine.cancel(job.security_scope_id, state.knowledge_base_id, generation)
@@ -225,6 +248,20 @@ class GraphWorker:
             task = await self._engine.task(
                 job.security_scope_id, state.knowledge_base_id, generation
             )
+            if (
+                task is not None
+                and state.engine_task_id is None
+                and task.engine_task_id == job.payload.get("previous_engine_task_id")
+            ):
+                raise RagError(
+                    "RAG-GRAPH-006", "无法确认原生构图提交结果，请核查后手动重试", 409, False
+                )
+            if (
+                task is not None
+                and state.engine_task_id is not None
+                and task.engine_task_id != state.engine_task_id
+            ):
+                raise RagError("RAG-GRAPH-007", "原生任务已被其他构建替换", 409, False)
         raise RagError("RAG-GRAPH-011", "取消已请求，原生任务终止尚未确认", 504, True)
 
     async def _state(self, job: IngestionJob) -> GraphState | None:
