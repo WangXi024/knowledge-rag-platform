@@ -38,8 +38,15 @@
 | Apple Silicon | 仅 RAGFlow 容器使用 `linux/amd64` 兼容模式；自研镜像保持 ARM64 原生构建 |
 | 对外协议 | REST/JSON + SSE |
 | 版本策略 | 固定稳定 Tag 和镜像 Digest；初期不 Fork |
+| 原生图谱一期 | 默认关闭；受控 `native-graph-light@1`、知识库管理、持久化构图/取消及原文导航补召回；不提供图谱浏览 |
 
 说明：目标部署统一使用 PostgreSQL，但必须保持逻辑隔离。RAG Gateway/Worker 只访问 `rag_app`，RAGFlow 只访问 `rag_flow`；两个数据库使用不同账号、迁移和备份边界，任何一侧都不得直接读写另一侧的数据表。本项目尚无历史数据，因此 RAGFlow 只执行空 PostgreSQL 初始化和完整 PoC，不执行 MySQL 数据迁移；PoC 失败时按选型报告中的回退策略处理。
+
+原生 GraphRAG 一期实现的开关、四个管理接口、状态、原文引用、过滤旁路、活动物理
+文档严格一致条件与取消终态限制，统一见[接入与验收说明](../docs/NATIVE_GRAPHRAG.md)。
+四组模型最小 API 请求已通过，不能据此宣布原生构建→检索→引用完整流程已验收。
+当前仅同步实现范围，不默认启用图谱，不为临时 Kimi K3 变更代码或专用 Token 参数；
+内存有限的本机验收按单任务、测试并发 `1` 顺序执行。
 
 ## 3. 文件清单
 

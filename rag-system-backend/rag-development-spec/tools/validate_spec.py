@@ -16,6 +16,7 @@ REQUIRED_FILES = {
     "openapi/rag-api-v1.yaml",
     "database/schema.sql",
     "configs/application.example.yaml",
+    "configs/graph_profiles.example.yaml",
     "deploy/docker-compose.app.yml",
     "deploy/docker-compose.full.yml",
     "deploy/docker-compose.storage.yml",
@@ -203,11 +204,10 @@ def validate_application_config() -> None:
     assert semantic["require_same_security_scope"] is True
     assert semantic["revalidate_citations"] is True
     assert semantic["vector_data_type"] == "FLOAT32"
-    # 两个模型或修订即使返回相同维度也不能共享语义缓存；门禁固定检查 v2 名称和
-    # 前缀，防止只改版本数字却仍把新向量写进旧 Key 空间。
-    assert semantic["index_schema_version"] == 2
-    assert semantic["index_name"] == "rag_semantic_cache_v2"
-    assert semantic["key_prefix"] == "rag-cache:semantic:v2:"
+    # v3增加过滤和图谱边界；检查名字和前缀，不能仅改数字却混写历史索引。
+    assert semantic["index_schema_version"] == 3
+    assert semantic["index_name"] == "rag_semantic_cache_v3"
+    assert semantic["key_prefix"] == "rag-cache:semantic:v3:"
     uploads = config["uploads"]
     assert uploads["staging_backend"] == "local_volume"
     assert uploads["staging_dir"] == "/var/lib/rag/uploads"

@@ -1773,6 +1773,79 @@
         }
       }
     },
+    "/v1/management/documents/{document_id}/source": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Get Document Source",
+        "description": "只读转发固定修订的 PDF；不暴露存储地址，禁止缓存，完成/取消均关闭下游流。",
+        "operationId": "get_document_source_v1_management_documents__document_id__source_get",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "document_revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "title": "Document Revision"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/management/documents/{document_id}/chunks": {
       "get": {
         "tags": [
@@ -2017,7 +2090,7 @@
           "Retrieval"
         ],
         "summary": "Retrieve",
-        "description": "执行可解释的混合检索并返回候选文本块。",
+        "description": "仅在认证租户的知识库中执行纯检索并返回候选文本块。\n\n租户身份来自认证上下文；请求体只能缩小知识库范围，不能指定系统共享库。\n本路由不写库；未知、系统或跨租户知识库由应用层统一返回 404。",
         "operationId": "retrieve_v1_retrieval_post",
         "parameters": [
           {
@@ -2524,33 +2597,23 @@
         }
       }
     },
-    "/v1/management/documents/{document_id}/source": {
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph": {
       "get": {
         "tags": [
-          "Documents"
+          "Graph"
         ],
-        "summary": "Get Document Source",
-        "description": "只读转发固定修订的 PDF；不暴露存储地址，禁止缓存，完成/取消均关闭下游流。",
-        "operationId": "get_document_source_v1_management_documents__document_id__source_get",
+        "summary": "Get Graph",
+        "description": "查询当前配置和图谱状态，不触发构图或模型费用。",
+        "operationId": "get_graph_v1_management_knowledge_bases__knowledge_base_id__graph_get",
         "parameters": [
           {
-            "name": "document_id",
+            "name": "knowledge_base_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Document Id"
-            }
-          },
-          {
-            "name": "document_revision",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "title": "Document Revision"
+              "title": "Knowledge Base Id"
             }
           },
           {
@@ -2576,10 +2639,205 @@
           "200": {
             "description": "Successful Response",
             "content": {
-              "application/pdf": {
+              "application/json": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "$ref": "#/components/schemas/GraphStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/configuration": {
+      "put": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Configure Graph",
+        "description": "配置知识库图谱；自动构建开启时仅登记任务，不等待模型执行。",
+        "operationId": "configure_graph_v1_management_knowledge_bases__knowledge_base_id__graph_configuration_put",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphConfigurationData"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/build": {
+      "post": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Build Graph",
+        "description": "请求构建、重建或失败重试，相同知识库的在途请求合并。",
+        "operationId": "build_graph_v1_management_knowledge_bases__knowledge_base_id__graph_build_post",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphStateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/cancel": {
+      "post": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Cancel Graph",
+        "description": "登记取消意图；CANCELLING 明确表示尚未确认引擎执行结束。",
+        "operationId": "cancel_graph_v1_management_knowledge_bases__knowledge_base_id__graph_cancel_post",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphStateResponse"
                 }
               }
             }
@@ -3147,7 +3405,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -3159,7 +3417,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -3387,7 +3645,7 @@
             "anyOf": [
               {
                 "type": "number",
-                "minimum": 0
+                "minimum": 0.0
               },
               {
                 "type": "null"
@@ -3495,7 +3753,7 @@
           },
           "file_size_bytes": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "File Size Bytes"
           },
           "content_sha256": {
@@ -3517,13 +3775,13 @@
           },
           "active_version_number": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Active Version Number",
             "default": 1
           },
           "document_revision": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Document Revision",
             "default": 1
           },
@@ -3546,18 +3804,18 @@
           },
           "progress": {
             "type": "number",
-            "maximum": 1,
-            "minimum": 0,
+            "maximum": 1.0,
+            "minimum": 0.0,
             "title": "Progress"
           },
           "chunk_count": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Chunk Count"
           },
           "token_count": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Token Count"
           },
           "last_error": {
@@ -3676,7 +3934,7 @@
           },
           "version_number": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Version Number"
           },
           "job_id": {
@@ -3744,7 +4002,7 @@
           },
           "version_number": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Version Number"
           },
           "filename": {
@@ -3757,7 +4015,7 @@
           },
           "file_size_bytes": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "File Size Bytes"
           },
           "content_sha256": {
@@ -3800,12 +4058,12 @@
           },
           "chunk_count": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Chunk Count"
           },
           "token_count": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Token Count"
           },
           "last_error": {
@@ -3994,6 +4252,233 @@
         "title": "FeedbackResponse",
         "description": "反馈提交响应。"
       },
+      "GraphConfigurationData": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "profile_ref": {
+            "type": "string",
+            "const": "native-graph-light@1",
+            "title": "Profile Ref",
+            "default": "native-graph-light@1"
+          },
+          "auto_build": {
+            "type": "boolean",
+            "title": "Auto Build",
+            "default": true
+          },
+          "retrieval_enabled": {
+            "type": "boolean",
+            "title": "Retrieval Enabled",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "GraphConfigurationData",
+        "description": "知识库级受控图谱配置，默认关闭；查询开关与构图开关独立。"
+      },
+      "GraphRetrievalDiagnostics": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "version_hash": {
+            "type": "string",
+            "title": "Version Hash"
+          },
+          "generations": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Generations"
+          },
+          "query_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Query Count",
+            "default": 0
+          },
+          "source_candidate_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Source Candidate Count",
+            "default": 0
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Elapsed Ms",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "mode",
+          "version_hash"
+        ],
+        "title": "GraphRetrievalDiagnostics",
+        "description": "仅包含图谱模式、版本和计数，不公开安全摘要、引擎ID、模型密钥或聚合正文。"
+      },
+      "GraphStateData": {
+        "properties": {
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "configuration": {
+            "$ref": "#/components/schemas/GraphConfigurationData"
+          },
+          "status": {
+            "$ref": "#/components/schemas/GraphStatus"
+          },
+          "target_content_revision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Target Content Revision"
+          },
+          "built_for_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Built For Revision"
+          },
+          "graph_generation": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Graph Generation"
+          },
+          "configuration_version": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Configuration Version"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "knowledge_base_id",
+          "configuration",
+          "status",
+          "target_content_revision",
+          "graph_generation",
+          "configuration_version",
+          "updated_at"
+        ],
+        "title": "GraphStateData",
+        "description": "图谱状态和内容/图谱版本；任务接收与图谱就绪通过独立状态表达。"
+      },
+      "GraphStateResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "data": {
+            "$ref": "#/components/schemas/GraphStateData"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "data"
+        ],
+        "title": "GraphStateResponse",
+        "description": "图谱管理操作的统一响应。"
+      },
+      "GraphStatus": {
+        "type": "string",
+        "enum": [
+          "DISABLED",
+          "NOT_BUILT",
+          "QUEUED",
+          "BUILDING",
+          "READY",
+          "STALE",
+          "FAILED",
+          "CANCELLING"
+        ],
+        "title": "GraphStatus",
+        "description": "图谱配置、构建、失效和取消的对外生命周期；失败不能伪装为可用。"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -4116,18 +4601,18 @@
           },
           "progress": {
             "type": "number",
-            "maximum": 1,
-            "minimum": 0,
+            "maximum": 1.0,
+            "minimum": 0.0,
             "title": "Progress"
           },
           "attempt": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Attempt"
           },
           "max_attempts": {
             "type": "integer",
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Max Attempts"
           },
           "knowledge_base_id": {
@@ -4275,7 +4760,7 @@
           },
           "revision": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Revision"
           },
           "parser_profile": {
@@ -4296,7 +4781,7 @@
           },
           "document_count": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Document Count"
           },
           "reindex_required": {
@@ -4514,7 +4999,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -4526,7 +5011,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -4538,7 +5023,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -4783,7 +5268,7 @@
           },
           "total": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Total"
           },
           "warnings": {
@@ -4792,6 +5277,16 @@
             },
             "type": "array",
             "title": "Warnings"
+          },
+          "graph_diagnostics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphRetrievalDiagnostics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -4810,8 +5305,8 @@
         "properties": {
           "page_size": {
             "type": "integer",
-            "maximum": 50,
-            "minimum": 1,
+            "maximum": 50.0,
+            "minimum": 1.0,
             "title": "Page Size",
             "default": 10
           },
@@ -4959,7 +5454,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -5073,17 +5568,17 @@
         "properties": {
           "prompt_tokens": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Prompt Tokens"
           },
           "completion_tokens": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Completion Tokens"
           },
           "total_tokens": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 0.0,
             "title": "Total Tokens"
           }
         },

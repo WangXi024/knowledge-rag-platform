@@ -2,7 +2,7 @@
 
 当前后端部署：[本地一键部署](../deploy/local/README.md) · [ECS 操作入口](../deploy/ecs/README.md) · [当前数据库字典](../deploy/ecs/数据库字典.md)。旧数据库部署包保留为历史参考。
 
-更新时间：2026-08-24
+更新时间：2026-11-13
 
 本文描述当前工作分支的实现；具体可回滚代码基线以两个仓库各自的 Git 提交记录为准。
 正式普通用户端位于同级独立仓库 `lazytt-frontend-console`，不再以内嵌前端目录作为
@@ -24,6 +24,7 @@
 | 架构评审人员 | [ADR-0004-OPENAI-COMPATIBLE-MODELS.md](ADR-0004-OPENAI-COMPATIBLE-MODELS.md) | 查看供应商无关模型契约与启动探测决策 |
 | 检索/摄取开发者 | [STRUCTURE_AWARE_CHUNKING.md](STRUCTURE_AWARE_CHUNKING.md) | 了解自动 Chunk Profile、动态 Parent、表格行组和上下文前缀 |
 | 文档更新功能开发者 | [DOCUMENT_VERSION_UPDATES.md](DOCUMENT_VERSION_UPDATES.md) | 了解候选版本、安全发布、回滚和缓存失效边界 |
+| 原生图谱接入与验收人员 | [NATIVE_GRAPHRAG.md](NATIVE_GRAPHRAG.md) | 了解默认关闭能力、管理接口、严格来源校验、过滤旁路与取消限制 |
 
 部署脚本、环境变量、Smoke 和恢复操作仍以
 [deploy/local/README.md](../deploy/local/README.md) 为详细运维入口。
@@ -71,6 +72,8 @@
     级增量更新。
 21. Gateway 从 27 个操作增加到 30 个：新增上传候选版本、查询版本历史和回滚退役
     版本三个接口；应用数据库随 `0006` 迁移从 11 张增至 12 张表。
+22. 新增默认关闭的原生 GraphRAG 一期：独立 Chat 登记、四个知识库管理接口、
+    异步构建/取消、管理界面与原文导航补召回；完整原生流程仍须单独真实验收。
 
 ## 3. 仍需特别区分的状态
 
@@ -94,8 +97,9 @@
 - 跨语言检索目前重点支持中文和英文；
 - 完全重复文件已按 `content_sha256` 拒绝；内容相似但字节不同的文件不会自动删除，
   以免误删合同/说明书的新版本；在线语义去重只作用于一次召回的候选 Chunk；
-- 当前实体/关系索引是确定性轻量导航，不是完整 GraphRAG，没有跨文档实体消歧、
-  隐含关系推理或外部图数据库；既有 READY 文档需要重解析才会获得侧车索引；
+- 既有侧车实体/关系索引保持确定性轻量导航；另新增默认关闭的原生 GraphRAG 一期，
+  不提供图谱浏览、社区报告问答或外部图数据库。四组模型最小 API 请求通过不等于
+  原生构图、检索和引用完整流程验收；严格物理版本边界等限制见[接入文档](NATIVE_GRAPHRAG.md)；
 - 大型 Excel、扫描 PDF、图片和长音视频的处理速度受 RAGFlow、云端模型配额/延迟、
   FFmpeg、内存和 Chunk 数量共同影响；音视频目前不提供说话人分离和词级时间戳；
 - 当前是单机本地开发 Profile，尚未完成生产 TLS、Secret Manager、高可用、容量
