@@ -681,6 +681,15 @@ class QueryRecordRow(Base):
             "cache_status IN ('BYPASS','MISS','EXACT_HIT','SEMANTIC_HIT','WRITE_FAILED')",
             name="chk_query_cache",
         ),
+        CheckConstraint(
+            "evidence_mode IN ('original','community')", name="chk_query_evidence_mode"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(aggregate_evidence_json) = 'array' "
+            "AND jsonb_array_length(aggregate_evidence_json) <= 4 "
+            "AND octet_length(aggregate_evidence_json::text) <= 1048576",
+            name="chk_query_aggregate_evidence",
+        ),
         Index("idx_query_scope_created", "security_scope_id", "created_at"),
         Index("idx_query_scope_outcome", "security_scope_id", "outcome", "created_at"),
         Index("idx_query_expiry", "expires_at"),
@@ -697,6 +706,13 @@ class QueryRecordRow(Base):
     effective_query_redacted: Mapped[str | None] = mapped_column(Text)
     knowledge_base_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     retrieval_profile_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="original"
+    )
+    aggregate_profile_ref: Mapped[str | None] = mapped_column(String(128))
+    aggregate_evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
     prompt_profile_ref: Mapped[str | None] = mapped_column(String(128))
     model_profile_ref: Mapped[str | None] = mapped_column(String(128))
     cache_status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="BYPASS")

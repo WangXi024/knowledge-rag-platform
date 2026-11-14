@@ -21,6 +21,7 @@ import {
 } from "@/lib/client-api";
 import { Card, Empty, JsonOutput, PageHead, Status } from "./shared";
 import type { ResourceIds } from "./use-resources";
+import { aggregateEvents, AggregateEvidencePanel, type AggregateEvidence } from './aggregate-evidence';
 
 type Citation = {
   citation_id: string;
@@ -71,6 +72,8 @@ export function AnswersPanel({
   const [mode, setMode] = useState<"stream" | "rest">("stream");
   const [answer, setAnswer] = useState("");
   const [citations, setCitations] = useState<Citation[]>([]);
+  const [aggregateEvidence, setAggregateEvidence] = useState<AggregateEvidence[]>([]);
+  const [evidenceMode, setEvidenceMode] = useState<'original' | 'community'>('original');
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [result, setResult] = useState<unknown>();
   const [queryTrace, setQueryTrace] = useState<QueryTrace>();
@@ -88,6 +91,7 @@ export function AnswersPanel({
       retrieval_profile: String(form.get("retrievalProfile")),
       generation_profile: String(form.get("generationProfile")),
       response_language: String(form.get("responseLanguage")),
+      evidence_mode: String(form.get('evidenceMode') || 'original'),
     };
   }
 
@@ -96,10 +100,12 @@ export function AnswersPanel({
     setBusy(true);
     setAnswer("");
     setCitations([]);
+    setAggregateEvidence([]);
     setEvents([]);
     setResult(undefined);
     setQueryTrace(undefined);
     const form = new FormData(event.currentTarget);
+    setEvidenceMode(form.get('evidenceMode') === 'community' ? 'community' : 'original');
     try {
       const payload = requestPayload(form);
       setQueryTrace({ original: String(payload.query), effective: "" });
@@ -109,6 +115,7 @@ export function AnswersPanel({
           data: {
             answer?: string;
             citations?: Citation[];
+            aggregate_evidence?: AggregateEvidence[];
             original_query?: string;
             effective_query?: string;
             query_plan?: {
@@ -125,6 +132,7 @@ export function AnswersPanel({
         }>("v1/answers", { method: "POST", body: payload });
         setAnswer(response.data.answer ?? "");
         setCitations(response.data.citations ?? []);
+        setAggregateEvidence(aggregateEvents([], response.data.aggregate_evidence ?? []));
         setQueryTrace({
           original: response.data.original_query ?? String(payload.query),
           effective: response.data.effective_query ?? String(payload.query),
@@ -175,6 +183,7 @@ export function AnswersPanel({
     const decoder = new TextDecoder();
     let buffer = "";
     let fullAnswer = "";
+    let fullAggregateEvidence: AggregateEvidence[] = [];
     const collected: StreamEvent[] = [];
     while (true) {
       const { done, value } = await reader.read();
@@ -209,6 +218,14 @@ export function AnswersPanel({
         }
         if (eventName === "citation" && data.citation) {
           setCitations((current) => [...current, data.citation as Citation]);
+        }
+        if (eventName === 'aggregate.evidence' && data.evidence) {
+          fullAggregateEvidence = aggregateEvents(fullAggregateEvidence, data.evidence);
+          setAggregateEvidence(fullAggregateEvidence);
+        }
+        if (eventName === 'completed' && Array.isArray(data.aggregate_evidence)) {
+          fullAggregateEvidence = aggregateEvents([], data.aggregate_evidence);
+          setAggregateEvidence(fullAggregateEvidence);
         }
         if (eventName === "retrieval.completed") {
           const original = data.original_query;
@@ -287,13 +304,14 @@ export function AnswersPanel({
               <Empty title="提出一个有依据的问题" description="回答必须基于已解析文档并带有效引用；无依据时应明确拒答。" />
             ) : (
               <div className="message">
-                <div className="message-label">RAG ASSISTANT · QWEN3.7-MAX</div>
-                <div className="message-bubble">{answer || "正在检索证据…"}</div>
+                <div className="message-label">RAG ASSISTANT</div>
+                <div className="message-bubble">{answer || (evidenceMode === 'community' ? '正在核验聚合来源…' : '正在检索证据…')}</div>
               </div>
             )}
           </div>
           <form className="chat-composer" onSubmit={submit}>
             <div className="field-grid">
+              <div className="field"><label>证据模式</label><select className="select" name="evidenceMode" defaultValue="original"><option value="original">原文引用</option><option value="community">原文 + 本平台生成社区摘要</option></select></div>
               <div className="field">
                 <label>Knowledge Base IDs</label>
                 <input className="input" value={knowledgeBaseIds} onChange={(event) => setKnowledgeBaseIds(event.target.value)} required placeholder="UUID，多个用逗号分隔" />
@@ -411,6 +429,9 @@ export function AnswersPanel({
             )) : (
               <div className="inline-note"><Bot size={16} /> 成功回答后在此展示已验证引用。</div>
             )}
+          </Card>
+          <Card title="聚合证据" description="A 标签是本平台生成社区摘要；C 标签仍表示原文引用。">
+            {aggregateEvidence.length ? <AggregateEvidencePanel key={requestId} items={aggregateEvidence} /> : <p className="hint">{evidenceMode === 'community' ? '暂无可用社区摘要，可切换到原文模式提问。' : '原文模式使用 C 标签引用，不使用聚合证据。'}</p>}
           </Card>
           <Card title="完成事件 / 原始响应">
             <JsonOutput value={result ?? (events.length ? events[events.length - 1] : undefined)} busy={busy} />

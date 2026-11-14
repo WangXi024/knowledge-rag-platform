@@ -7,7 +7,7 @@ import { FormEvent, useState } from "react";
 import { gatewayRequest, payloadFrom } from "@/lib/client-api";
 import { Card, JsonOutput, Method, PageHead, Status } from "./shared";
 
-type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 type Endpoint = {
   method: HttpMethod;
   path: string;
@@ -18,6 +18,9 @@ type Endpoint = {
 };
 
 const endpoints: Endpoint[] = [
+  { method: "GET", path: "v1/knowledge-bases?page=1&page_size=20", group: "Shared Sources", location: "普通用户只读知识库" },
+  { method: "GET", path: "v1/documents/{document_id}", group: "Shared Sources", location: "普通用户只读文档" },
+  { method: "GET", path: "v1/documents/{document_id}/chunks?page=1&page_size=20", group: "Shared Sources", location: "原文回读，可附 document_revision" },
   { method: "GET", path: "health/live", group: "System", location: "系统状态" },
   { method: "GET", path: "health/ready", group: "System", location: "系统状态" },
   { method: "GET", path: "v1/version", group: "System", location: "系统状态" },
@@ -33,6 +36,13 @@ const endpoints: Endpoint[] = [
   },
   { method: "GET", path: "v1/management/knowledge-bases?page=1&page_size=20", group: "Knowledge Bases", location: "知识库" },
   { method: "GET", path: "v1/management/knowledge-bases/{knowledge_base_id}", group: "Knowledge Bases", location: "知识库" },
+  { method: "GET", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph", group: "GraphRAG", location: "图谱状态" },
+  { method: "PUT", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/configuration", group: "GraphRAG", location: "图谱受控配置", body: JSON.stringify({ enabled: false, profile_ref: "native-graph-light@1", auto_build: false, retrieval_enabled: false }, null, 2) },
+  { method: "POST", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/build", group: "GraphRAG", location: "提交构图（可能调用模型）", body: "{}" },
+  { method: "POST", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/cancel", group: "GraphRAG", location: "取消待确认", body: "{}" },
+  { method: "GET", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/view?depth=1&limit=40", group: "GraphRAG", location: "只读实体/关系，可附 query、node_id、generation" },
+  { method: "GET", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/communities", group: "GraphRAG", location: "本平台生成社区摘要列表，可附 generation" },
+  { method: "GET", path: "v1/management/knowledge-bases/{knowledge_base_id}/graph/communities/{community_id}", group: "GraphRAG", location: "社区摘要详情，可附 generation" },
   { method: "PATCH", path: "v1/management/knowledge-bases/{knowledge_base_id}", group: "Knowledge Bases", location: "知识库", body: '{\n  "description": "updated by local console"\n}' },
   { method: "DELETE", path: "v1/management/knowledge-bases/{knowledge_base_id}", group: "Knowledge Bases", location: "知识库" },
   { method: "POST", path: "v1/management/knowledge-bases/{knowledge_base_id}/documents", group: "Documents", location: "文档与解析", multipart: true },
@@ -114,7 +124,7 @@ export function ApiConsolePanel() {
               <div className="field">
                 <label>Method</label>
                 <select className="select" value={method} onChange={(event) => setMethod(event.target.value as HttpMethod)}>
-                  <option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option>
+                  <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
                 </select>
               </div>
               <div className="field">

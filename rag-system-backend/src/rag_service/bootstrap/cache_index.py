@@ -21,6 +21,8 @@ _CACHE_BOUNDARY_TAG_FIELDS = (
     "filter_hash",
     "graph_version_hash",
     "graph_mode",
+    "evidence_mode",
+    "aggregate_profile_ref",
 )
 
 
@@ -161,6 +163,10 @@ class RedisSemanticIndexBootstrap:
             "graph_version_hash",
             "TAG",
             "graph_mode",
+            "TAG",
+            "evidence_mode",
+            "TAG",
+            "aggregate_profile_ref",
             "TAG",
             "created_at_ms",
             "NUMERIC",

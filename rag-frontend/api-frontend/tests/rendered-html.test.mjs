@@ -18,19 +18,22 @@ test("defines the direct tenant and user development surface", async () => {
   assert.doesNotMatch(`${page}\n${shell}\n${layout}`, /Your site is taking shape|react-loading-skeleton/i);
 });
 
-test("declares product entry points for all 30 Gateway endpoints", async () => {
+test("declares Gateway and graph browsing entry points with the restricted configuration method", async () => {
   const source = await readFile(
     new URL("../components/console/api-console-panel.tsx", import.meta.url),
     "utf8",
   );
-  const declarations = source.match(/method: "(?:GET|POST|PATCH|DELETE)"/g) ?? [];
-  assert.equal(declarations.length, 30);
+  const declarations = source.match(/method: "(?:GET|POST|PUT|PATCH|DELETE)"/g) ?? [];
+  assert.ok(declarations.length >= 37);
   for (const requiredPath of [
     "health/live",
     "health/ready",
     "v1/knowledge-bases",
     "v1/documents/{document_id}/chunks",
-    "v1/documents/{document_id}/versions",
+    "v1/management/documents/{document_id}/versions",
+    "v1/management/knowledge-bases/{knowledge_base_id}/graph/view",
+    "v1/management/knowledge-bases/{knowledge_base_id}/graph/communities",
+    "v1/management/knowledge-bases/{knowledge_base_id}/graph/configuration",
     "v1/retrieval",
     "v1/answers/stream",
     "v1/requests/{request_id}/citations",

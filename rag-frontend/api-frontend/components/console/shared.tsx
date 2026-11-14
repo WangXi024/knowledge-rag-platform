@@ -115,7 +115,7 @@ export function Method({
   method,
   path,
 }: {
-  method: "GET" | "POST" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
 }) {
   return (

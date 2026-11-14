@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -20,7 +21,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import CHAR
+from sqlalchemy.dialects.postgresql import CHAR, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -57,12 +58,22 @@ class GraphStateRow(Base, TimestampMixin):
             "status <> 'READY' OR (built_for_revision IS NOT NULL AND graph_generation > 0)",
             name="chk_graph_state_ready_version",
         ),
+        CheckConstraint(
+            "jsonb_typeof(community_reports_json) = 'array' "
+            "AND jsonb_array_length(community_reports_json) <= 4 "
+            "AND octet_length(community_reports_json::text) <= 1048576",
+            name="chk_graph_community_reports",
+        ),
         Index("idx_graph_state_scope_status", "security_scope_id", "status", "updated_at"),
         {"schema": SCHEMA},
     )
 
     security_scope_id: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
     knowledge_base_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    # 报告与图状态在同一CAS更新中提交，旧图过期后不得独立读取此JSON。
+    community_reports_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     profile_ref: Mapped[str] = mapped_column(String(128), nullable=False)
     auto_build: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")

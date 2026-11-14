@@ -411,3 +411,24 @@ button:disabled { cursor: not-allowed; opacity: .62; }
   .chat-error { margin-inline: 12px; }
   .conversation-tools label svg { display: none; }
 }
+
+/* 聚合证据是独立生成内容，样式、来源入口和普通绿色原文引用明确区分。 */
+.aggregate-chip, .citation-chip.aggregate-chip { color: #704790; background: #f2eafa; }
+.aggregate-card { margin: 14px; padding: 18px; border: 1px solid #d9c9e8; border-radius: 12px; background: #fcf9ff; }
+.aggregate-card.active { outline: 2px solid #a77fc3; }
+.aggregate-card h3 { margin: 12px 0; font-size: 15px; }
+.aggregate-card > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-size: 14px; }
+.aggregate-badge { display: inline-block; padding: 5px 8px; border-radius: 6px; color: #704790; background: #f2eafa; font-size: 12px; }
+.aggregate-card small, .aggregate-meta { color: #777080; font-size: 11px; overflow-wrap: anywhere; }
+.aggregate-card details { margin-top: 15px; }
+.aggregate-card summary { cursor: pointer; font-size: 13px; }
+.aggregate-card ul { padding-left: 18px; }
+.aggregate-card li { margin: 8px 0; }
+.aggregate-card li button { max-width: 100%; border: 0; color: #704790; background: none; text-align: left; overflow-wrap: anywhere; }
+.aggregate-source-dialog { width: min(680px, 94vw); max-height: 85vh; padding: 24px; border: 1px solid #d9c9e8; border-radius: 14px; color: #34433e; overflow-y: auto; }
+.aggregate-source-dialog::backdrop { background: #15271e66; }
+.aggregate-source-dialog header { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+.aggregate-source-dialog h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.aggregate-source-dialog header button { border: 0; background: none; font-size: 24px; }
+.aggregate-source-dialog blockquote { margin: 18px 0 0; padding: 16px; border-left: 3px solid #9e80b6; background: #fcf9ff; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; }
+@media (max-width: 600px) { .conversation-tools { flex-wrap: wrap; } .conversation-head { height: auto; min-height: 65px; gap: 8px; } .aggregate-card { margin: 10px; } }

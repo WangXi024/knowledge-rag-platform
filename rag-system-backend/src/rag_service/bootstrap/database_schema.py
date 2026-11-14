@@ -1,7 +1,7 @@
 """准备本地 PostgreSQL Schema，并只读校验所有存储模式的结构与所有权边界。
 
 ``local`` 模式供本地开发使用：启动脚本会先执行冻结 SQL、登记兼容的
-V1.0.0 基线，再顺序执行评审的 V1.1.0、V1.2.0 增量 SQL。该写入入口显式拒绝 ``external``，
+V1.0.0 基线，再顺序执行评审的 V1.1.0、V1.2.0、V1.3.0 增量 SQL。该写入入口显式拒绝 ``external``，
 且在表集合、历史版本、发布字段或待清理数据不满足前置条件时停止。所有模式随后仍
 执行同一套只读门禁。外部数据库继续完全由 DBA 执行评审 SQL。
 """
@@ -19,17 +19,21 @@ from sqlalchemy.engine import make_url
 
 APP_SCHEMA = "rag_app"
 APP_LEGACY_ALEMBIC_HEAD = "0006_document_version_updates"
-APP_ALEMBIC_HEAD = "0007_native_graphrag"
+APP_GRAPH_ALEMBIC_HEAD = "0007_native_graphrag"
+APP_ALEMBIC_HEAD = "0008_graph_aggregate_evidence"
 APP_LEGACY_SCHEMA_RELEASE = "V1.0.0"
 APP_LEGACY_SCHEMA_CHECKSUM = "427e6747cf6054d521ad3b292b81a4721612e43494e1560794a821f8bfed83d3"
 APP_PREVIOUS_SCHEMA_RELEASE = "V1.1.0"
 APP_PREVIOUS_SCHEMA_CHECKSUM = "6f61654d651c73816a9dd85db3a55bfbd8f5ab5f1296908de60d93aa873f3109"
-APP_SCHEMA_RELEASE = "V1.2.0"
+APP_GRAPH_SCHEMA_RELEASE = "V1.2.0"
+APP_GRAPH_SCHEMA_CHECKSUM = "b8b9d47888f009e8b1800eab08092eef3227cbff69b50a81f7a51746e3833c49"
+APP_SCHEMA_RELEASE = "V1.3.0"
 # 该摘要来自“Schema 名 + 发布版本 + Alembic 头 + 14 张应用表”的规范化清单。
 # 启动门禁只比较固定值，不在运行时重新生成，避免不同平台的序列化差异。
-APP_SCHEMA_CHECKSUM = "b8b9d47888f009e8b1800eab08092eef3227cbff69b50a81f7a51746e3833c49"
+APP_SCHEMA_CHECKSUM = "08964c430c371b296844af2cd6445c7ff54407904a16b151b65e119f8aae2c74"
 APP_SHARED_RELEASE_SQL = "V1.0.0__to__V1.1.0__shared_knowledge_bases.sql"
 APP_LOCAL_RELEASE_SQL = "V1.1.0__to__V1.2.0__native_graphrag.sql"
+APP_EVIDENCE_RELEASE_SQL = "V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql"
 APP_RELEASE_COLUMNS = frozenset({"version_num", "release_version", "schema_checksum", "applied_at"})
 APP_RELEASE_METADATA_COLUMNS = APP_RELEASE_COLUMNS - {"version_num"}
 APP_PREVIOUS_TABLES = frozenset(
@@ -75,6 +79,7 @@ APP_TABLES_BY_REVISION = {
     "0005_allow_section_index_nodes": APP_INITIAL_TABLES
     | {"document_entity", "document_index_node", "entity_relation"},
     APP_LEGACY_ALEMBIC_HEAD: APP_PREVIOUS_TABLES,
+    APP_GRAPH_ALEMBIC_HEAD: APP_TABLES,
     APP_ALEMBIC_HEAD: APP_TABLES,
 }
 RAGFLOW_TABLES = frozenset(
@@ -144,7 +149,8 @@ class SchemaCheckResult:
 class LocalSchemaPlan:
     """本地 Schema 当前可执行的唯一安全动作。
 
-    ``action`` 为 ``migrate``、``stamp``、``upgrade_shared``、``upgrade`` 或 ``ready``：
+    ``action`` 为 ``migrate``、``stamp``、``upgrade_shared``、``upgrade``、
+    ``upgrade_evidence`` 或 ``ready``：
     分别表示冻结初始 SQL、登记旧基线、共享库升级、图谱增量升级、以及无需写入。
     """
 
@@ -200,7 +206,7 @@ def _classify_local_app_schema(
         raise RuntimeError(
             f"local rag_app has a partial release stamp ({columns}); automatic repair was refused"
         )
-    if revision not in {APP_LEGACY_ALEMBIC_HEAD, APP_ALEMBIC_HEAD}:
+    if revision not in {APP_LEGACY_ALEMBIC_HEAD, APP_GRAPH_ALEMBIC_HEAD, APP_ALEMBIC_HEAD}:
         if present_release_columns:
             raise RuntimeError(
                 f"local rag_app revision {revision} already has release metadata; "
@@ -233,6 +239,12 @@ def _classify_local_app_schema(
         and schema_checksum == APP_PREVIOUS_SCHEMA_CHECKSUM
     ):
         return LocalSchemaPlan(action="upgrade", revision=revision)
+    if (
+        revision == APP_GRAPH_ALEMBIC_HEAD
+        and release_version == APP_GRAPH_SCHEMA_RELEASE
+        and schema_checksum == APP_GRAPH_SCHEMA_CHECKSUM
+    ):
+        return LocalSchemaPlan(action="upgrade_evidence", revision=revision)
     if (
         revision != APP_ALEMBIC_HEAD
         or release_version != APP_SCHEMA_RELEASE
@@ -378,7 +390,7 @@ def _required_environment(name: str) -> str:
 
 
 async def prepare_local_app_database_schema() -> dict[str, object]:
-    """在显式 local 模式准备应用库；空库和 0006/V1.0/V1.1/V1.2 复用安全 SQL 链。
+    """在显式 local 模式准备应用库；空库和 0006/V1.0/V1.1/V1.2/V1.3 复用安全 SQL 链。
 
     旧的 alembic_version 是兼容版本表，绝不因取消 Alembic 删除其数据。更早版本和
     半成品结构拒绝自动处理；V1.1 对带数据的 V1.0 库继续拒绝，V1.1 到 V1.2 无损追加。
@@ -401,6 +413,7 @@ async def prepare_local_app_database_schema() -> dict[str, object]:
             "stamp": "V1.0.0__stamp_existing_schema.sql",
             "upgrade_shared": APP_SHARED_RELEASE_SQL,
             "upgrade": APP_LOCAL_RELEASE_SQL,
+            "upgrade_evidence": APP_EVIDENCE_RELEASE_SQL,
         }
         while plan.action != "ready":
             filename = files[plan.action]

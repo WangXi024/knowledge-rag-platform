@@ -10,6 +10,9 @@ import pytest
 
 from rag_service.bootstrap.database_schema import (
     APP_ALEMBIC_HEAD,
+    APP_GRAPH_ALEMBIC_HEAD,
+    APP_GRAPH_SCHEMA_CHECKSUM,
+    APP_GRAPH_SCHEMA_RELEASE,
     APP_INITIAL_TABLES,
     APP_LEGACY_ALEMBIC_HEAD,
     APP_LEGACY_SCHEMA_CHECKSUM,
@@ -162,11 +165,11 @@ def test_permission_contract_is_strict_only_for_external_storage(monkeypatch) ->
 
 
 def test_expected_schema_fingerprint_matches_reviewed_install_package() -> None:
-    """锁定 V1.2.0 的 14 张应用表、0007 头和不可变摘要。"""
+    """锁定 V1.3.0 的 14 张应用表、0008 头和不可变摘要。"""
     assert len(APP_TABLES) == 14
     assert len(RAGFLOW_TABLES) == 42
-    assert APP_ALEMBIC_HEAD == "0007_native_graphrag"
-    assert APP_SCHEMA_RELEASE == "V1.2.0"
+    assert APP_ALEMBIC_HEAD == "0008_graph_aggregate_evidence"
+    assert APP_SCHEMA_RELEASE == "V1.3.0"
     # 摘要输入按“Schema、正式版本、历史头、排序后的表名”逐行编码，并保留末尾
     # 换行。这样 DBA、测试和启动门禁使用完全相同、可人工复算的固定规则。
     release_manifest = "\n".join(
@@ -266,9 +269,9 @@ def test_v12_release_sql_adds_graph_state_and_preserves_existing_business_data()
     assert "current_database() <> 'rag_app'" in release_sql
     assert f"current_release <> '{APP_PREVIOUS_SCHEMA_RELEASE}'" in release_sql
     assert APP_PREVIOUS_SCHEMA_CHECKSUM in release_sql
-    assert f"version_num = '{APP_ALEMBIC_HEAD}'" in release_sql
-    assert f"release_version = '{APP_SCHEMA_RELEASE}'" in release_sql
-    assert APP_SCHEMA_CHECKSUM in release_sql
+    assert f"version_num = '{APP_GRAPH_ALEMBIC_HEAD}'" in release_sql
+    assert f"release_version = '{APP_GRAPH_SCHEMA_RELEASE}'" in release_sql
+    assert APP_GRAPH_SCHEMA_CHECKSUM in release_sql
     assert "PRIMARY KEY (security_scope_id, knowledge_base_id)" in release_sql
     assert "REFERENCES rag_app.knowledge_base (security_scope_id, id)" in release_sql
     assert "CREATE UNIQUE INDEX uk_graph_job_inflight" in release_sql
@@ -302,3 +305,13 @@ def test_local_schema_plan_never_restamps_unrecognized_graph_release(
             release_columns=APP_RELEASE_COLUMNS if release else frozenset({"version_num"}),
             release_version=release, schema_checksum=checksum, release_applied=applied,
         )
+
+
+def test_v12_is_upgraded_without_rewriting_historical_sql() -> None:
+    """已发布一期保留历史摘要；只接受精确V1.2登记进入新增字段升级。"""
+    plan = _classify_local_app_schema(
+        actual_tables=APP_TABLES, revisions=(APP_GRAPH_ALEMBIC_HEAD,),
+        release_columns=APP_RELEASE_COLUMNS, release_version=APP_GRAPH_SCHEMA_RELEASE,
+        schema_checksum=APP_GRAPH_SCHEMA_CHECKSUM, release_applied=True,
+    )
+    assert plan.action == "upgrade_evidence"

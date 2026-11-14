@@ -60,6 +60,10 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
   }
 
   const runtime = getRuntimeEnvironment();
+  // PUT 仅用于已批准的图谱配置，原始请求器不能扩大成任意写入代理。
+  if (request.method === 'PUT' && !/^v1\/management\/knowledge-bases\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/graph\/configuration$/iu.test(joinedPath)) {
+    return Response.json({ error: '不允许代理该 PUT 路径' }, { status: 403 });
+  }
   const requestUrl = new URL(request.url);
   const upstreamUrl = new URL(
     `/${joinedPath}${requestUrl.search}`,
@@ -108,5 +112,6 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
 
 export const GET = proxy;
 export const POST = proxy;
+export const PUT = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;

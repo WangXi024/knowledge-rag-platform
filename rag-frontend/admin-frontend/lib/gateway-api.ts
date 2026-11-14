@@ -40,6 +40,7 @@ export async function gatewayRequest<T>(
     method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     body?: JsonObject | FormData;
     idempotent?: boolean;
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const headers = new Headers({
@@ -64,6 +65,7 @@ export async function gatewayRequest<T>(
     method: options.method ?? 'GET',
     headers,
     body,
+    signal: options.signal,
   });
   const contentType = response.headers.get('content-type') ?? '';
   const payload: unknown = contentType.includes('application/json')

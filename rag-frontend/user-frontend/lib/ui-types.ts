@@ -70,12 +70,47 @@ export type Candidate = {
 
 export type CacheType = "none" | "exact" | "semantic";
 
+export type EvidenceMode = "original" | "community";
+
+/** 聚合来源仍是当前活动版本的真实原文；不把生成摘要塞进 Citation.quote。 */
+export type AggregateSource = {
+  knowledge_base_id: string;
+  document_id: string;
+  document_name: string;
+  document_revision: number;
+  active_version_id: string | null;
+  chunk_id: string;
+  quote: string;
+  positions: Array<{ page: number | null; bbox?: [number, number, number, number] | null }>;
+};
+
+export type AggregateEvidence = {
+  aggregate_id: string;
+  label: string;
+  kind: "community_aggregate";
+  derived: true;
+  origin: "gateway_generated";
+  knowledge_base_id: string;
+  community_id: string;
+  title: string;
+  summary: string;
+  graph_generation: number;
+  content_revision: number;
+  configuration_version: number;
+  graph_profile_ref: string;
+  generator_model_ref: string;
+  strategy_ref: string;
+  sources: AggregateSource[];
+};
+
 export type EvidenceBundle = {
   candidates: Candidate[];
   citations: Citation[];
   durationMs: number | null;
   total: number;
   cacheType: CacheType | null;
+  aggregateEvidence?: AggregateEvidence[];
+  evidenceMode?: EvidenceMode;
 };
 
 export type ChatMessage = {
@@ -85,6 +120,7 @@ export type ChatMessage = {
   evidence?: EvidenceBundle;
   requestId?: string | null;
   streaming?: boolean;
+  evidenceMode?: EvidenceMode;
 };
 
 export type ConversationSummary = { id: string; title: string; createdAt: number; updatedAt: number };

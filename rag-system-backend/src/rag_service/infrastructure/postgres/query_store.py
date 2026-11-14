@@ -87,6 +87,18 @@ class TransactionalQueryRepository:
                 citation_id,
             )
 
+    async def get_citation_request_id(
+        self,
+        security_scope_id: str,
+        citation_id: UUID,
+    ) -> UUID | None:
+        """用独立只读事务定位引用所属请求，后续复核沿用相同主体范围。"""
+        async with self._factory() as session, session.begin():
+            return await SqlAlchemyQueryRepository(session).get_citation_request_id(
+                security_scope_id,
+                citation_id,
+            )
+
     async def add_feedback(
         self,
         security_scope_id: str,

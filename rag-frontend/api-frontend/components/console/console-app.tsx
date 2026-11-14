@@ -50,7 +50,7 @@ const navItems = [
   { key: "answers", label: "问答实验室", icon: MessageSquareText, group: "Online" },
   { key: "requests", label: "请求与反馈", icon: Quote, group: "Quality" },
   { key: "system", label: "系统状态", icon: Database, group: "Quality" },
-  { key: "api", label: "全接口控制台", icon: Braces, group: "Quality", count: "30" },
+  { key: "api", label: "全接口控制台", icon: Braces, group: "Quality", count: "API" },
 ] as const;
 
 const panelTitles: Record<PanelKey, string> = {
@@ -71,8 +71,12 @@ export function ConsoleApp() {
   const { resources, setResources, resetResources } = useResources();
 
   useEffect(() => {
-    setTenantIdState(getDirectTenantId());
-    setUserIdState(getDirectUserId());
+    // 首次客户端同步延后一轮，保持服务端/客户端初始结构一致，并在卸载时撤销。
+    const timer = window.setTimeout(() => {
+      setTenantIdState(getDirectTenantId());
+      setUserIdState(getDirectUserId());
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   function navigate(target: string) {

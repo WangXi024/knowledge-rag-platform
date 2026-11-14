@@ -32,6 +32,8 @@ def cache_id(boundary: CacheBoundary, normalized_question: str) -> str:
         boundary.filter_hash,
         boundary.graph_version_hash,
         boundary.graph_mode,
+        boundary.evidence_mode,
+        boundary.aggregate_profile_ref,
         question_hash,
     )
     return hashlib.sha256("\x1f".join(values).encode("utf-8")).hexdigest()

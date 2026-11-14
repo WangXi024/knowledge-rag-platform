@@ -9,3 +9,14 @@ profiles:
     entity_types: [organization, person, geo, event, category]
     community: false
     resolution: false
+  - ref: native-graph-with-summaries@1
+    enabled: true
+    description: RAGFlow 原生轻量构图后由 Gateway 生成有真实多来源引用的聚合报告
+    contract_version: v0.26.4
+    method: light
+    entity_types: [organization, person, geo, event, category]
+    community: false
+    resolution: false
+    gateway_reports: true
+    report_origin: gateway_generated
+    report_strategy_ref: gateway-connected-community@1

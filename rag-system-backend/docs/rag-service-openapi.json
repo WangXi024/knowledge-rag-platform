@@ -2854,10 +2854,521 @@
           }
         }
       }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/view": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Graph View",
+        "description": "搜索实体或展开有界邻域；图版本变化409，超时503，不沿用旧图。",
+        "operationId": "graph_view_v1_management_knowledge_bases__knowledge_base_id__graph_view_get",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Query"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 2,
+              "minimum": 0,
+              "default": 1,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 40,
+              "minimum": 1,
+              "default": 40,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Generation"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphViewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/communities": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Communities",
+        "description": "只列出已生成且来源仍有效的社区，不因浏览请求调用模型。",
+        "operationId": "communities_v1_management_knowledge_bases__knowledge_base_id__graph_communities_get",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Generation"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommunityListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/management/knowledge-bases/{knowledge_base_id}/graph/communities/{community_id}": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Community Detail",
+        "description": "详情沿相同权限/版本/原文核查；不存在与不可见报告保持统一404。",
+        "operationId": "community_detail_v1_management_knowledge_bases__knowledge_base_id__graph_communities__community_id__get",
+        "parameters": [
+          {
+            "name": "knowledge_base_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Knowledge Base Id"
+            }
+          },
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Community Id"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Generation"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-User-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommunityResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AggregateEvidenceData": {
+        "properties": {
+          "aggregate_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Aggregate Id"
+          },
+          "label": {
+            "type": "string",
+            "pattern": "^(A[1-9][0-9]*)?$",
+            "title": "Label"
+          },
+          "kind": {
+            "type": "string",
+            "const": "community_aggregate",
+            "title": "Kind",
+            "default": "community_aggregate"
+          },
+          "derived": {
+            "type": "boolean",
+            "const": true,
+            "title": "Derived",
+            "default": true
+          },
+          "origin": {
+            "type": "string",
+            "const": "gateway_generated",
+            "title": "Origin",
+            "default": "gateway_generated"
+          },
+          "generator_model_ref": {
+            "type": "string",
+            "title": "Generator Model Ref"
+          },
+          "strategy_ref": {
+            "type": "string",
+            "title": "Strategy Ref"
+          },
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "community_id": {
+            "type": "string",
+            "title": "Community Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "graph_generation": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Graph Generation"
+          },
+          "content_revision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Content Revision"
+          },
+          "configuration_version": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Configuration Version"
+          },
+          "graph_profile_ref": {
+            "type": "string",
+            "title": "Graph Profile Ref"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateSourceData"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "minItems": 2,
+            "title": "Sources"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "aggregate_id",
+          "label",
+          "generator_model_ref",
+          "strategy_ref",
+          "knowledge_base_id",
+          "community_id",
+          "title",
+          "summary",
+          "graph_generation",
+          "content_revision",
+          "configuration_version",
+          "graph_profile_ref",
+          "sources"
+        ],
+        "title": "AggregateEvidenceData",
+        "description": "带 A 标签的 Gateway 社区摘要；summary 是派生文本，sources.quote 才是原文。"
+      },
+      "AggregatePositionData": {
+        "properties": {
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array",
+                "maxItems": 4,
+                "minItems": 4
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bbox"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AggregatePositionData",
+        "description": "来源原文位置，不把 TXT 解析器的占位坐标解释为物理页码。"
+      },
+      "AggregateSourceData": {
+        "properties": {
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "document_name": {
+            "type": "string",
+            "title": "Document Name"
+          },
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "quote": {
+            "type": "string",
+            "title": "Quote"
+          },
+          "document_revision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Document Revision"
+          },
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/AggregatePositionData"
+            },
+            "type": "array",
+            "title": "Positions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "knowledge_base_id",
+          "document_id",
+          "document_name",
+          "chunk_id",
+          "quote",
+          "document_revision"
+        ],
+        "title": "AggregateSourceData",
+        "description": "可独立回读核验的一段原文，chunk_id 与文档 Chunk API 的原生 ID 一致。"
+      },
       "AnswerData": {
         "properties": {
           "answer": {
@@ -2898,6 +3409,23 @@
             },
             "type": "array",
             "title": "Citations"
+          },
+          "evidence_mode": {
+            "type": "string",
+            "enum": [
+              "original",
+              "community"
+            ],
+            "title": "Evidence Mode",
+            "default": "original"
+          },
+          "aggregate_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateEvidenceData"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Aggregate Evidence"
           },
           "warnings": {
             "items": {
@@ -3008,6 +3536,15 @@
             ],
             "title": "Response Language",
             "default": "zh-CN"
+          },
+          "evidence_mode": {
+            "type": "string",
+            "enum": [
+              "original",
+              "community"
+            ],
+            "title": "Evidence Mode",
+            "default": "original"
           }
         },
         "additionalProperties": false,
@@ -3504,6 +4041,92 @@
         ],
         "title": "CitationResponse",
         "description": "单条引用响应。"
+      },
+      "CommunityListData": {
+        "properties": {
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/GraphStatus"
+          },
+          "graph_generation": {
+            "type": "integer",
+            "title": "Graph Generation"
+          },
+          "content_revision": {
+            "type": "integer",
+            "title": "Content Revision"
+          },
+          "communities": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateEvidenceData"
+            },
+            "type": "array",
+            "title": "Communities"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "knowledge_base_id",
+          "status",
+          "graph_generation",
+          "content_revision",
+          "communities",
+          "warnings"
+        ],
+        "title": "CommunityListData",
+        "description": "版本固定的已生成报告；不可用时明确空列表和状态。"
+      },
+      "CommunityListResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "data": {
+            "$ref": "#/components/schemas/CommunityListData"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "data"
+        ],
+        "title": "CommunityListResponse",
+        "description": "社区只读列表响应。"
+      },
+      "CommunityResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "data": {
+            "$ref": "#/components/schemas/AggregateEvidenceData"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "data"
+        ],
+        "title": "CommunityResponse",
+        "description": "单份可回溯报告响应，失败时不返回旧正文。"
       },
       "CreateFeedbackRequest": {
         "properties": {
@@ -4261,7 +4884,10 @@
           },
           "profile_ref": {
             "type": "string",
-            "const": "native-graph-light@1",
+            "enum": [
+              "native-graph-light@1",
+              "native-graph-with-summaries@1"
+            ],
             "title": "Profile Ref",
             "default": "native-graph-light@1"
           },
@@ -4280,6 +4906,110 @@
         "type": "object",
         "title": "GraphConfigurationData",
         "description": "知识库级受控图谱配置，默认关闭；查询开关与构图开关独立。"
+      },
+      "GraphEdgeData": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "generated": {
+            "type": "boolean",
+            "const": true,
+            "title": "Generated",
+            "default": true
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateSourceData"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "source_status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Source Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "source",
+          "target",
+          "description",
+          "source_status"
+        ],
+        "title": "GraphEdgeData",
+        "description": "有界关系详情；端点只引用同次响应内的公开实体。"
+      },
+      "GraphNodeData": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "generated": {
+            "type": "boolean",
+            "const": true,
+            "title": "Generated",
+            "default": true
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateSourceData"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "source_status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Source Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entity_type",
+          "description",
+          "source_status"
+        ],
+        "title": "GraphNodeData",
+        "description": "生成的实体描述与真实来源分区，不把描述投影为 quote。"
       },
       "GraphRetrievalDiagnostics": {
         "properties": {
@@ -4478,6 +5208,87 @@
         ],
         "title": "GraphStatus",
         "description": "图谱配置、构建、失效和取消的对外生命周期；失败不能伪装为可用。"
+      },
+      "GraphViewData": {
+        "properties": {
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/GraphStatus"
+          },
+          "graph_generation": {
+            "type": "integer",
+            "title": "Graph Generation"
+          },
+          "content_revision": {
+            "type": "integer",
+            "title": "Content Revision"
+          },
+          "profile_ref": {
+            "type": "string",
+            "title": "Profile Ref"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNodeData"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdgeData"
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "knowledge_base_id",
+          "status",
+          "graph_generation",
+          "content_revision",
+          "profile_ref"
+        ],
+        "title": "GraphViewData",
+        "description": "管理浏览页面的状态与受限结构；读取不会生成模型摘要。"
+      },
+      "GraphViewResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          },
+          "data": {
+            "$ref": "#/components/schemas/GraphViewData"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "data"
+        ],
+        "title": "GraphViewResponse",
+        "description": "与其他 API 一致的请求标识和单次图视图。"
       },
       "HTTPValidationError": {
         "properties": {
@@ -5128,6 +5939,34 @@
               }
             ],
             "title": "Answer"
+          },
+          "evidence_mode": {
+            "type": "string",
+            "enum": [
+              "original",
+              "community"
+            ],
+            "title": "Evidence Mode",
+            "default": "original"
+          },
+          "aggregate_profile_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aggregate Profile Ref"
+          },
+          "aggregate_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/AggregateEvidenceData"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Aggregate Evidence"
           },
           "warnings": {
             "items": {

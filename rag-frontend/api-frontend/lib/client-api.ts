@@ -57,7 +57,7 @@ export class GatewayError extends Error {
 export async function gatewayRequest<T = JsonRecord>(
   path: string,
   options: {
-    method?: "GET" | "POST" | "PATCH" | "DELETE";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     body?: JsonRecord | FormData;
     idempotent?: boolean;
     idempotencyKey?: string;

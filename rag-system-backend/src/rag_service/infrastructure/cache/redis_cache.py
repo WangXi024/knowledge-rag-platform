@@ -14,6 +14,7 @@ import time
 from typing import Any, Protocol
 from uuid import UUID
 
+from rag_service.domain.aggregate import EvidenceMode, evidences_from_payload, to_payload
 from rag_service.domain.cache import cache_id
 from rag_service.domain.models import Citation, SourcePosition
 from rag_service.domain.ports import (
@@ -26,7 +27,9 @@ from rag_service.settings import CacheSection
 
 _TAG_SPECIAL = re.compile(r"([^A-Za-z0-9_])")
 _QUERY_TYPES = frozenset({"fact", "list", "comparison", "summary", "multi_hop"})
-_EXTENDED_BOUNDARY_FIELDS = ("filter_hash", "graph_version_hash", "graph_mode")
+_EXTENDED_BOUNDARY_FIELDS = (
+    "filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref"
+)
 
 
 class RedisPipeline(Protocol):
@@ -102,7 +105,10 @@ class RedisAnswerCache:
         stored_boundary = value.get("boundary")
         if not isinstance(stored_boundary, dict) or not _has_extended_boundary(stored_boundary):
             return None
-        entry = _entry(value, similarity=None)
+        try:
+            entry = _entry(value, similarity=None)
+        except (KeyError, TypeError, ValueError):
+            return None
         if (
             entry.cache_id != identifier
             or entry.boundary != boundary
@@ -140,6 +146,8 @@ class RedisAnswerCache:
                 f"@filter_hash:{{{_escape_tag(boundary.filter_hash)}}}",
                 f"@graph_version_hash:{{{_escape_tag(boundary.graph_version_hash)}}}",
                 f"@graph_mode:{{{_escape_tag(boundary.graph_mode)}}}",
+                f"@evidence_mode:{{{_escape_tag(boundary.evidence_mode)}}}",
+                f"@aggregate_profile_ref:{{{_escape_tag(boundary.aggregate_profile_ref)}}}",
                 f"@expires_at_ms:[{now_ms} +inf]",
             )
         )
@@ -161,7 +169,7 @@ class RedisAnswerCache:
             "SORTBY",
             "vector_distance",
             "RETURN",
-            15,
+            17,
             "cache_id",
             "security_scope_id",
             "knowledge_base_revisions_hash",
@@ -173,6 +181,8 @@ class RedisAnswerCache:
             "filter_hash",
             "graph_version_hash",
             "graph_mode",
+            "evidence_mode",
+            "aggregate_profile_ref",
             "normalized_question",
             "answer_json",
             "citations_json",
@@ -190,7 +200,10 @@ class RedisAnswerCache:
             similarity = 1.0 - distance
             if similarity < self._settings.semantic.similarity_threshold:
                 continue
-            entry = _entry_from_hash(fields, similarity)
+            try:
+                entry = _entry_from_hash(fields, similarity)
+            except (KeyError, TypeError, ValueError):
+                continue
             if entry.boundary != boundary:
                 continue
             entries.append(entry)
@@ -243,10 +256,15 @@ class RedisAnswerCache:
                 "filter_hash": boundary.filter_hash,
                 "graph_version_hash": boundary.graph_version_hash,
                 "graph_mode": boundary.graph_mode,
+                "evidence_mode": boundary.evidence_mode,
+                "aggregate_profile_ref": boundary.aggregate_profile_ref,
                 "normalized_question": value.normalized_question,
                 "answer_json": json.dumps(
                     {
                         "answer": value.answer,
+                        "aggregate_evidence": [
+                            to_payload(item) for item in value.aggregate_evidence
+                        ],
                         "original_query": value.original_query,
                         "effective_query": value.effective_query,
                         "query_language": value.query_language,
@@ -352,6 +370,8 @@ def _boundary(value: dict[str, Any]) -> CacheBoundary:
         filter_hash=str(value["filter_hash"]),
         graph_version_hash=str(value["graph_version_hash"]),
         graph_mode=str(value["graph_mode"]),
+        evidence_mode=_evidence_mode(value["evidence_mode"]),
+        aggregate_profile_ref=str(value["aggregate_profile_ref"]),
     )
 
 
@@ -379,6 +399,7 @@ def _entry(value: dict[str, Any], similarity: float | None) -> CacheEntry:
         normalized_question=str(value["normalized_question"]),
         answer=str(value["answer"]),
         citations=tuple(_citation(item) for item in citations),
+        aggregate_evidence=evidences_from_payload(value.get("aggregate_evidence", [])),
         original_query=(
             str(value["original_query"])
             if value.get("original_query") is not None
@@ -433,10 +454,13 @@ def _entry_from_hash(value: dict[str, Any], similarity: float) -> CacheEntry:
             filter_hash=_text(value["filter_hash"]),
             graph_version_hash=_text(value["graph_version_hash"]),
             graph_mode=_text(value["graph_mode"]),
+            evidence_mode=_evidence_mode(_text(value["evidence_mode"])),
+            aggregate_profile_ref=_text(value["aggregate_profile_ref"]),
         ),
         normalized_question=_text(value["normalized_question"]),
         answer=str(answer["answer"]),
         citations=tuple(_citation(item) for item in citations_raw),
+        aggregate_evidence=evidences_from_payload(answer.get("aggregate_evidence", [])),
         original_query=(
             str(answer["original_query"])
             if answer.get("original_query") is not None
@@ -489,10 +513,13 @@ def _entry_json(value: CacheEntry) -> dict[str, Any]:
             "filter_hash": value.boundary.filter_hash,
             "graph_version_hash": value.boundary.graph_version_hash,
             "graph_mode": value.boundary.graph_mode,
+            "evidence_mode": value.boundary.evidence_mode,
+            "aggregate_profile_ref": value.boundary.aggregate_profile_ref,
         },
         "normalized_question": value.normalized_question,
         "answer": value.answer,
         "citations": [_citation_json(item) for item in value.citations],
+        "aggregate_evidence": [to_payload(item) for item in value.aggregate_evidence],
         "original_query": value.original_query,
         "effective_query": value.effective_query,
         "query_language": value.query_language,
@@ -525,6 +552,15 @@ def _citation_json(value: Citation) -> dict[str, Any]:
         "score": value.score,
         "rerank_score": value.rerank_score,
     }
+
+
+def _evidence_mode(value: Any) -> EvidenceMode:
+    """模式字段不得隐式转成默认原文模式。"""
+    if value == "original":
+        return "original"
+    if value == "community":
+        return "community"
+    raise ValueError("invalid cached evidence mode")
 
 
 def _citation(value: Any) -> Citation:

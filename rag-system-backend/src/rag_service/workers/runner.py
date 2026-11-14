@@ -7,13 +7,17 @@ import logging
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+from rag_service.application.community_reports import CommunityReportBuilder
 from rag_service.application.graph import GraphService
 from rag_service.application.graph_worker import GraphWorker
 from rag_service.application.ingestion_worker import IngestionWorker
 from rag_service.application.profiles import ProfileCatalog
 from rag_service.domain.models import JobType, utc_now
 from rag_service.infrastructure.media.openai_compatible import OpenAICompatibleMediaProcessor
-from rag_service.infrastructure.models.openai_compatible import OpenAICompatibleEmbeddingAdapter
+from rag_service.infrastructure.models.openai_compatible import (
+    OpenAICompatibleEmbeddingAdapter,
+    OpenAICompatibleLlmAdapter,
+)
 from rag_service.infrastructure.postgres.graph_repository import SqlAlchemyGraphRepository
 from rag_service.infrastructure.postgres.repositories import (
     SqlAlchemyDocumentRepository,
@@ -179,6 +183,10 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                     profiles=profiles,
                 )
                 native_graph = RagFlowGraphAdapter(settings.ragflow, knowledge_bases, documents)
+                # 社区生成不对未知响应自动重发；沿用现有模型/Token/采样协议。
+                report_llm = OpenAICompatibleLlmAdapter(
+                    settings.models.llm.model_copy(update={"max_attempts": 1})
+                )
                 try:
                     if claimed.job_type == JobType.GRAPH_BUILD:
                         await GraphWorker(
@@ -189,6 +197,10 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                             graph_service,
                             checkpoint=checkpoint,
                             rollback=rollback,
+                            report_builder=CommunityReportBuilder(
+                                native_graph, report_llm, settings.models.llm,
+                                profiles, jobs, checkpoint,
+                            ),
                         ).execute(claimed)
                     else:
                         await IngestionWorker(
@@ -222,6 +234,7 @@ async def run_one_job(settings: ServiceSettings, worker_id: str) -> bool:
                     await embedding.close()
                     await rag_engine.close()
                     await native_graph.close()
+                    await report_llm.close()
         finally:
             stop_heartbeat.set()
             await heartbeat

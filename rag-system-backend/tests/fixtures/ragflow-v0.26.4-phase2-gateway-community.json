@@ -1,0 +1,280 @@
+{
+  "documents": [
+    {
+      "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+      "filename": "atlas-pilot.txt",
+      "text": "Mira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+      "sha256": "ea6008dbc5666273161b3c7fbac72f7ef12a96c736219e47123bc3967772600b",
+      "readback": {
+        "capture": "independent_public_document_and_chunk_get",
+        "status": "READY",
+        "document_revision": 1,
+        "active_version_id": "745daccb-427a-5403-84af-464a7ff2cc88",
+        "chunks": [
+          {
+            "id": "4c5b4c538dc5733d377bc70ab9538020",
+            "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+            "content": "\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+            "positions": []
+          }
+        ],
+        "chunk_hashes": [
+          {
+            "chunk_id": "4c5b4c538dc5733d377bc70ab9538020",
+            "sha256": "f7dec20fdd18bc03df756b936c5d1790ff4ea1b2a4cfb9d0453db6e83e255028"
+          }
+        ],
+        "quote_hashes": [
+          {
+            "chunk_id": "4c5b4c538dc5733d377bc70ab9538020",
+            "sha256": "f7dec20fdd18bc03df756b936c5d1790ff4ea1b2a4cfb9d0453db6e83e255028",
+            "origin": "captured_independent_acceptance_verification"
+          }
+        ],
+        "verified_stages": [
+          "community_json",
+          "tcp_community_complete"
+        ]
+      }
+    },
+    {
+      "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+      "filename": "aurora-atlas.txt",
+      "text": "Aurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+      "sha256": "18e38469f053cba916c9883a6c87f32028b259c4c46a78b7f2e6a526cc6afa5f",
+      "readback": {
+        "capture": "independent_public_document_and_chunk_get",
+        "status": "READY",
+        "document_revision": 1,
+        "active_version_id": "bcdcf9f0-3b2e-534f-9c04-d0697ca28ff8",
+        "chunks": [
+          {
+            "id": "f62076c27d7f6b67449b27f48aa27594",
+            "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+            "content": "\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+            "positions": []
+          }
+        ],
+        "chunk_hashes": [
+          {
+            "chunk_id": "f62076c27d7f6b67449b27f48aa27594",
+            "sha256": "5ea8431495d9e9676a826fade2b7269dcad2b2a2da4ebeb27cf8beb8c14f23e8"
+          }
+        ],
+        "quote_hashes": [
+          {
+            "chunk_id": "f62076c27d7f6b67449b27f48aa27594",
+            "sha256": "5ea8431495d9e9676a826fade2b7269dcad2b2a2da4ebeb27cf8beb8c14f23e8",
+            "origin": "captured_independent_acceptance_verification"
+          }
+        ],
+        "verified_stages": [
+          "community_json",
+          "tcp_community_complete"
+        ]
+      }
+    }
+  ],
+  "community_browse": {
+    "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+    "status": "READY",
+    "graph_generation": 1,
+    "content_revision": 2,
+    "communities": [
+      {
+        "aggregate_id": "d8d35141-78c1-5a6a-a6a8-d2b2c72e3519",
+        "label": "",
+        "kind": "community_aggregate",
+        "derived": true,
+        "origin": "gateway_generated",
+        "generator_model_ref": "synthetic-chat",
+        "strategy_ref": "gateway-connected-community@1",
+        "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+        "community_id": "2706e9c70caa4f4415a563a2fde4b8ac",
+        "title": "Community · ATLAS",
+        "summary": "Aurora Labs develops Atlas, a renewable energy forecasting research project led by Mira Chen, who manages its engineering team. Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, and Aurora Labs collaborates with that center.",
+        "graph_generation": 1,
+        "content_revision": 2,
+        "configuration_version": 1,
+        "graph_profile_ref": "native-graph-with-summaries@1",
+        "sources": [
+          {
+            "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+            "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+            "document_name": "aurora-atlas.txt",
+            "chunk_id": "f62076c27d7f6b67449b27f48aa27594",
+            "quote": "\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+            "document_revision": 1,
+            "active_version_id": "bcdcf9f0-3b2e-534f-9c04-d0697ca28ff8",
+            "positions": []
+          },
+          {
+            "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+            "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+            "document_name": "atlas-pilot.txt",
+            "chunk_id": "4c5b4c538dc5733d377bc70ab9538020",
+            "quote": "\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+            "document_revision": 1,
+            "active_version_id": "745daccb-427a-5403-84af-464a7ff2cc88",
+            "positions": []
+          }
+        ]
+      }
+    ],
+    "warnings": []
+  },
+  "community_answer": {
+    "request_id": "ff5559b9-5c9d-582a-bc1a-9f3fe6aa94b9",
+    "data": {
+      "answer": "**Connection (from original excerpts):**\n- Aurora Labs develops the Atlas project, a research project for renewable energy forecasting, and appointed Mira Chen as its leader; she manages the Atlas engineering team [C2].\n- Mira Chen leads Atlas for Aurora Labs, and Atlas is tested at the Harbor Research Center, which hosts the Atlas pilot; Aurora Labs collaborates with that center [C1].\n\n**Pilot location:** The Harbor Research Center is in Northport, so the Atlas pilot takes place in Northport [C1].\n\n**Cross-document synthesis (derived, not an original quotation):** The Gateway-generated community summary [A1] combines both documents into one account: Aurora Labs develops Atlas, a renewable energy forecasting project led by Mira Chen (who manages its engineering team), and Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, with Aurora Labs collaborating with that center. This summary is derived from the two original excerpts above, not a direct quote.\n\nNote: Both sources state the names are synthetic/fictional [C1][C2].",
+      "outcome": "success",
+      "response_language": "en-US",
+      "original_query": "Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location.",
+      "effective_query": "Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location.",
+      "query_rewritten": false,
+      "query_plan": {
+        "detected_language": "en-US",
+        "variants": {
+          "en-US": "Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location."
+        },
+        "knowledge_languages": [
+          "en-US"
+        ],
+        "retrieval_routes": [
+          "vector:original:en-US",
+          "term:en-US",
+          "ragflow:graph",
+          "context:parent",
+          "parent:children"
+        ],
+        "query_type": "fact",
+        "retrieval_top_k": 30,
+        "rerank_top_n": 8,
+        "context_top_n": 5
+      },
+      "citations": [
+        {
+          "citation_id": "951dd7cd-5c8d-5c65-a574-0a51527046bd",
+          "label": "C1",
+          "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+          "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+          "document_name": "atlas-pilot.txt",
+          "heading_path": [],
+          "page_start": null,
+          "page_end": null,
+          "positions": [],
+          "quote": "\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+          "score": 0.9865798354148865
+        },
+        {
+          "citation_id": "17184db0-ca7e-5b5a-8bbc-53ccfbf36f92",
+          "label": "C2",
+          "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+          "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+          "document_name": "aurora-atlas.txt",
+          "heading_path": [],
+          "page_start": null,
+          "page_end": null,
+          "positions": [],
+          "quote": "\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+          "score": 0.6628203392028809
+        }
+      ],
+      "evidence_mode": "community",
+      "aggregate_evidence": [
+        {
+          "aggregate_id": "10f6b02f-31f8-562d-bb26-bdc2df76798a",
+          "label": "A1",
+          "kind": "community_aggregate",
+          "derived": true,
+          "origin": "gateway_generated",
+          "generator_model_ref": "synthetic-chat",
+          "strategy_ref": "gateway-connected-community@1",
+          "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+          "community_id": "2706e9c70caa4f4415a563a2fde4b8ac",
+          "title": "Community · ATLAS",
+          "summary": "Aurora Labs develops Atlas, a renewable energy forecasting research project led by Mira Chen, who manages its engineering team. Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, and Aurora Labs collaborates with that center.",
+          "graph_generation": 1,
+          "content_revision": 2,
+          "configuration_version": 1,
+          "graph_profile_ref": "native-graph-with-summaries@1",
+          "sources": [
+            {
+              "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+              "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+              "document_name": "aurora-atlas.txt",
+              "chunk_id": "f62076c27d7f6b67449b27f48aa27594",
+              "quote": "\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\n",
+              "document_revision": 1,
+              "active_version_id": "bcdcf9f0-3b2e-534f-9c04-d0697ca28ff8",
+              "positions": []
+            },
+            {
+              "knowledge_base_id": "72748904-1250-5849-b24d-18439f3e38e9",
+              "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+              "document_name": "atlas-pilot.txt",
+              "chunk_id": "4c5b4c538dc5733d377bc70ab9538020",
+              "quote": "\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\n",
+              "document_revision": 1,
+              "active_version_id": "745daccb-427a-5403-84af-464a7ff2cc88",
+              "positions": []
+            }
+          ]
+        }
+      ],
+      "warnings": [
+        "native_graph_structural_navigation"
+      ],
+      "usage": {
+        "prompt_tokens": 667,
+        "completion_tokens": 486,
+        "total_tokens": 1153
+      },
+      "meta": {
+        "cache_type": "none"
+      }
+    }
+  },
+  "sse": {
+    "capture": "real_tcp_wire_frames_with_anonymized_identifiers",
+    "raw_frames": "event: accepted\nid: 1\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":1,\"timestamp\":\"2026-11-14T09:03:08.641709Z\",\"evidence_mode\":\"community\"}\n\nevent: retrieval.started\nid: 2\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":2,\"timestamp\":\"2026-11-14T09:03:08.647658Z\",\"retrieval_profile\":\"hybrid-structure-aware@6\"}\n\nevent: generation.started\nid: 3\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":3,\"timestamp\":\"2026-11-14T09:03:08.655226Z\",\"model_profile\":\"answer-openai-compatible@4\",\"response_language\":\"en-US\",\"evidence_mode\":\"community\",\"buffered_until_verified\":true}\n\nevent: retrieval.completed\nid: 4\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":4,\"timestamp\":\"2026-11-14T09:03:10.054986Z\",\"candidate_count\":2,\"context_count\":2,\"original_query\":\"Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location.\",\"effective_query\":\"Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location.\",\"query_rewritten\":false,\"query_plan\":{\"detected_language\":\"en-US\",\"variants\":{\"en-US\":\"Explain the connection between Aurora Labs, Mira Chen, and the Atlas pilot at Harbor Research Center, including the pilot location.\"},\"knowledge_languages\":[\"en-US\"],\"retrieval_routes\":[\"vector:original:en-US\",\"term:en-US\",\"ragflow:graph\",\"context:parent\",\"parent:children\"],\"query_type\":\"fact\",\"retrieval_top_k\":30,\"rerank_top_n\":8,\"context_top_n\":5}}\n\nevent: answer.delta\nid: 5\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":5,\"timestamp\":\"2026-11-14T09:03:10.063960Z\",\"delta\":\"**Connection (from original excerpts):**\\n- Aurora Labs develops the Atlas project, a research project for renewable energy forecasting, and appointed Mira Chen as its leader; she manages the Atlas engineering team [C2].\\n- Mira Chen leads Atlas for Aurora Labs, and Atlas is tested at the Harbor Research Center, which hosts the Atlas pilot; Aurora Labs collaborates with that center [C1].\\n\\n**Pilot location:** The Harbor Research Center is in Northport, so the Atlas pilot takes place in Northport [C1].\\n\\n**Cross-document synthesis (derived, not an original quotation):** The Gateway-generated community summary [A1] combines both documents into one account: Aurora Labs develops Atlas, a renewable energy forecasting project led by Mira Chen (who manages its engineering team), and Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, with Aurora Labs collaborating with that center. This summary is derived from the two original excerpts above, not a direct quote.\\n\\nNote: Both sources state the names are synthetic/fictional [C1][C2].\"}\n\nevent: citation\nid: 6\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":6,\"timestamp\":\"2026-11-14T09:03:10.072997Z\",\"citation\":{\"citation_id\":\"dac284dd-4ec7-5369-8dc3-416c042cb523\",\"label\":\"C1\",\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"f7e6f5d8-6680-56dc-accc-239b50a312fd\",\"document_name\":\"atlas-pilot.txt\",\"page_start\":null,\"page_end\":null,\"positions\":[],\"quote\":\"\\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\\n\",\"score\":0.0722739291380222}}\n\nevent: citation\nid: 7\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":7,\"timestamp\":\"2026-11-14T09:03:10.079849Z\",\"citation\":{\"citation_id\":\"652c4f48-4533-598c-9f8e-58314766a4e6\",\"label\":\"C2\",\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"201029b9-926a-5af2-a25b-6837357466bb\",\"document_name\":\"aurora-atlas.txt\",\"page_start\":null,\"page_end\":null,\"positions\":[],\"quote\":\"\\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\\n\",\"score\":0.07147540983606557}}\n\nevent: aggregate.evidence\nid: 8\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":8,\"timestamp\":\"2026-11-14T09:03:10.088320Z\",\"evidence\":{\"aggregate_id\":\"9138088b-8021-5c0d-9724-e15f4af48fee\",\"label\":\"A1\",\"kind\":\"community_aggregate\",\"derived\":true,\"origin\":\"gateway_generated\",\"generator_model_ref\":\"synthetic-chat\",\"strategy_ref\":\"gateway-connected-community@1\",\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"community_id\":\"2706e9c70caa4f4415a563a2fde4b8ac\",\"title\":\"Community · ATLAS\",\"summary\":\"Aurora Labs develops Atlas, a renewable energy forecasting research project led by Mira Chen, who manages its engineering team. Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, and Aurora Labs collaborates with that center.\",\"graph_generation\":1,\"content_revision\":2,\"configuration_version\":1,\"graph_profile_ref\":\"native-graph-with-summaries@1\",\"sources\":[{\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"201029b9-926a-5af2-a25b-6837357466bb\",\"document_name\":\"aurora-atlas.txt\",\"chunk_id\":\"f62076c27d7f6b67449b27f48aa27594\",\"quote\":\"\\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\\n\",\"document_revision\":1,\"active_version_id\":\"bcdcf9f0-3b2e-534f-9c04-d0697ca28ff8\",\"positions\":[]},{\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"f7e6f5d8-6680-56dc-accc-239b50a312fd\",\"document_name\":\"atlas-pilot.txt\",\"chunk_id\":\"4c5b4c538dc5733d377bc70ab9538020\",\"quote\":\"\\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\\n\",\"document_revision\":1,\"active_version_id\":\"745daccb-427a-5403-84af-464a7ff2cc88\",\"positions\":[]}]}}\n\nevent: usage\nid: 9\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":9,\"timestamp\":\"2026-11-14T09:03:10.095624Z\",\"prompt_tokens\":667,\"completion_tokens\":486,\"total_tokens\":1153}\n\nevent: completed\nid: 10\ndata: {\"request_id\":\"8dadba25-98dc-57d6-aa82-1a5e31ffc339\",\"sequence\":10,\"timestamp\":\"2026-11-14T09:03:10.134861Z\",\"outcome\":\"success\",\"warnings\":[\"native_graph_structural_navigation\"],\"cache_type\":\"exact\",\"timings\":{\"cache_lookup_ms\":1114.61,\"total_ms\":1395.668},\"evidence_mode\":\"community\",\"aggregate_evidence\":[{\"aggregate_id\":\"9138088b-8021-5c0d-9724-e15f4af48fee\",\"label\":\"A1\",\"kind\":\"community_aggregate\",\"derived\":true,\"origin\":\"gateway_generated\",\"generator_model_ref\":\"synthetic-chat\",\"strategy_ref\":\"gateway-connected-community@1\",\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"community_id\":\"2706e9c70caa4f4415a563a2fde4b8ac\",\"title\":\"Community · ATLAS\",\"summary\":\"Aurora Labs develops Atlas, a renewable energy forecasting research project led by Mira Chen, who manages its engineering team. Atlas is tested through a pilot hosted at the Harbor Research Center in Northport, and Aurora Labs collaborates with that center.\",\"graph_generation\":1,\"content_revision\":2,\"configuration_version\":1,\"graph_profile_ref\":\"native-graph-with-summaries@1\",\"sources\":[{\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"201029b9-926a-5af2-a25b-6837357466bb\",\"document_name\":\"aurora-atlas.txt\",\"chunk_id\":\"f62076c27d7f6b67449b27f48aa27594\",\"quote\":\"\\nAurora Labs develops the Atlas project. Atlas is a research project for renewable energy forecasting. Aurora Labs appointed Mira Chen as the leader of Atlas. Mira Chen manages the Atlas engineering team. This is a fictional acceptance fixture.\\n\",\"document_revision\":1,\"active_version_id\":\"bcdcf9f0-3b2e-534f-9c04-d0697ca28ff8\",\"positions\":[]},{\"knowledge_base_id\":\"72748904-1250-5849-b24d-18439f3e38e9\",\"document_id\":\"f7e6f5d8-6680-56dc-accc-239b50a312fd\",\"document_name\":\"atlas-pilot.txt\",\"chunk_id\":\"4c5b4c538dc5733d377bc70ab9538020\",\"quote\":\"\\nMira Chen leads the Atlas project for Aurora Labs. Atlas is tested at the Harbor Research Center in Northport. The Harbor Research Center hosts the Atlas pilot. Aurora Labs collaborates with the Harbor Research Center. All names are synthetic.\\n\",\"document_revision\":1,\"active_version_id\":\"745daccb-427a-5403-84af-464a7ff2cc88\",\"positions\":[]}]}]}\n\n"
+  },
+  "content_hashes": {
+    "algorithm": "sha256",
+    "origin": "independently_calculated_from_captured_public_text",
+    "summaries": [
+      {
+        "community_id": "2706e9c70caa4f4415a563a2fde4b8ac",
+        "sha256": "65e4b4e6b5b884dbe4284888ec90599a517de042180c8406ab47345a9b5e178c"
+      }
+    ],
+    "quotes": [
+      {
+        "document_id": "201029b9-926a-5af2-a25b-6837357466bb",
+        "chunk_id": "f62076c27d7f6b67449b27f48aa27594",
+        "sha256": "5ea8431495d9e9676a826fade2b7269dcad2b2a2da4ebeb27cf8beb8c14f23e8"
+      },
+      {
+        "document_id": "f7e6f5d8-6680-56dc-accc-239b50a312fd",
+        "chunk_id": "4c5b4c538dc5733d377bc70ab9538020",
+        "sha256": "f7dec20fdd18bc03df756b936c5d1790ff4ea1b2a4cfb9d0453db6e83e255028"
+      }
+    ]
+  },
+  "provenance": {
+    "ragflow_version": "v0.26.4",
+    "synthetic_only": true,
+    "capture_kind": "passed_real_gateway_public_api_and_tcp_sse",
+    "acceptance_stages": {
+      "browse": true,
+      "answers": true,
+      "sse": true
+    },
+    "origin": "gateway_generated",
+    "native_community_report": false,
+    "note": "Gateway summaries of connected native graph communities; not native RAGFlow reports.",
+    "identifiers": "deterministic_synthetic_replacements_shared_by_all_public_captures",
+    "body_text_changed": false,
+    "sensitive_metadata_exported": false
+  }
+}

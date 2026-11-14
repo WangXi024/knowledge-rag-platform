@@ -9,10 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from rag_service.domain.models import utc_now
+
+if TYPE_CHECKING:
+    from rag_service.domain.aggregate import AggregateEvidence
 
 # 固定 v0.26.4 通过官方图结构做有界导航；与原生 use_kg 聚合模式区分缓存和诊断。
 NATIVE_GRAPH_QUERY_MODE = "native_graph_read_v1"
@@ -35,6 +38,8 @@ class GraphProfile(StrEnum):
     """受控不可变图谱方案；不接受外部任意上游参数或动态覆盖同版本含义。"""
 
     NATIVE_LIGHT_V1 = "native-graph-light@1"
+    # 新策略额外生成 Gateway 聚合报告；原生 light 参数仍不启用不可公开读取的社区报告。
+    NATIVE_WITH_SUMMARIES_V1 = "native-graph-with-summaries@1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,10 +57,11 @@ class GraphConfiguration:
 
 
 def native_graph_parser_config(configuration: GraphConfiguration) -> dict[str, object]:
-    """生成受控 light@1 参数，统一覆盖 Dataset 与文档 Parser 的旧关闭默认值。
+    """生成受控原生 light 参数，统一覆盖 Dataset 与文档 Parser 的旧关闭默认值。
 
     v0.26.4 普通解析不会因该标志额外发起构图；真正构图由独立 GRAPH_BUILD Job
-    调用 index?type=graph。改变以下语义时必须新增策略版本及不可变种子。
+    调用 index?type=graph。with-summaries@1 的新增阶段属于 Gateway，不能把它
+    偷换为无法通过公开 API 回溯的原生 community=true。原 light@1 语义保持不变。
     """
     return {
         "use_graphrag": configuration.enabled,
@@ -72,6 +78,8 @@ class GraphState:
 
     ``built_for_revision`` 标记最后成功使用的内容版本，构图不会递增知识库内容
     修订号；``row_version`` 供数据库乐观锁使用；任务 ID 不作为授权凭据。
+    ``community_reports`` 只保存 Gateway 生成并带真实来源的派生报告，状态非 READY
+    时不得作为可用答案证据；原生图的描述不能直接填入此字段。
     """
 
     security_scope_id: str
@@ -87,6 +95,7 @@ class GraphState:
     job_id: UUID | None = None
     last_error_code: str | None = None
     last_error_message: str | None = None
+    community_reports: tuple[AggregateEvidence, ...] = ()
     queued_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None

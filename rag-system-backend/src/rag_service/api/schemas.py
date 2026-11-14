@@ -14,6 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from rag_service.api.aggregate_schemas import AggregateEvidenceData
+
 
 class ApiModel(BaseModel):
     """所有 API 模型的基类；拒绝客户端偷偷传入未声明字段。"""
@@ -469,6 +471,7 @@ class AnswerRequest(ApiModel):
     # 公共 API 使用供应商无关 Profile；实际模型和协议来自通用环境与 Bootstrap。
     generation_profile: str = Field(default="answer-openai-compatible@4", max_length=128)
     response_language: Literal["zh-CN", "en-US"] = "zh-CN"
+    evidence_mode: Literal["original", "community"] = "original"
 
     @model_validator(mode="after")
     def unique_knowledge_base_ids(self) -> AnswerRequest:
@@ -515,6 +518,8 @@ class AnswerData(ApiModel):
     query_rewritten: bool
     query_plan: QueryPlanData
     citations: list[CitationData]
+    evidence_mode: Literal["original", "community"] = "original"
+    aggregate_evidence: list[AggregateEvidenceData] = Field(default_factory=list, max_length=4)
     warnings: list[str]
     usage: UsageData | None = None
     meta: AnswerMeta
@@ -537,6 +542,9 @@ class RequestRecordData(ApiModel):
     original_query: str | None = None
     effective_query: str | None = None
     answer: str | None = None
+    evidence_mode: Literal["original", "community"] = "original"
+    aggregate_profile_ref: str | None = None
+    aggregate_evidence: list[AggregateEvidenceData] = Field(default_factory=list, max_length=4)
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     completed_at: datetime | None = None

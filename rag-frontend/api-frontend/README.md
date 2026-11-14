@@ -1,7 +1,7 @@
 # LazyTT RAG 开发测试控制台
 
-这是 3000 端口的全接口验收前端，不是普通用户产品页面。普通用户端位于独立
-`lazytt-frontend-console` 仓库，默认端口 3001。
+这是 3000 端口的接口验收前端。普通用户端位于当前 monorepo 的
+`rag-frontend/user-frontend`，默认端口 3001，管理端位于 `rag-frontend/admin-frontend`。
 
 ## 启动
 

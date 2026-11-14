@@ -36,9 +36,9 @@ class FakeRedis:
 def _settings() -> SemanticCacheSection:
     """使用独立的新一代测试索引，不读取或改变任何历史运行数据。"""
     return SemanticCacheSection(
-        key_prefix="rag-cache:semantic:v3:",
-        index_name="rag_semantic_cache_v3",
-        index_schema_version=3,
+        key_prefix="rag-cache:semantic:v4:",
+        index_name="rag_semantic_cache_v4",
+        index_schema_version=4,
         embedding_model="test-embedding",
         embedding_dimension=128,
     )
@@ -52,6 +52,7 @@ def _boundary_attributes() -> list[list[Any]]:
             "security_scope_id", "knowledge_base_revisions_hash", "retrieval_profile",
             "prompt_profile", "model_profile", "language", "history_hash",
             "filter_hash", "graph_version_hash", "graph_mode",
+            "evidence_mode", "aggregate_profile_ref",
         )
     ]
 
@@ -67,7 +68,9 @@ async def test_cache_bootstrap_creates_missing_index() -> None:
     create = next(command for command in client.commands if command[0] == "FT.CREATE")
     assert "security_scope_id" in create
     assert "knowledge_base_revisions_hash" in create
-    for name in ("filter_hash", "graph_version_hash", "graph_mode"):
+    for name in (
+        "filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref",
+    ):
         assert create[create.index(name) + 1] == "TAG"
     assert create[create.index("DIM") + 1] == 128
     metadata = next(command for command in client.commands if command[0] == "HSET")
@@ -80,7 +83,7 @@ async def test_cache_bootstrap_accepts_matching_index() -> None:
     client = FakeRedis(
         [
             "index_definition",
-            ["prefixes", ["rag-cache:semantic:v3:"]],
+            ["prefixes", ["rag-cache:semantic:v4:"]],
             "attributes",
             [
                 *_boundary_attributes(),
@@ -102,7 +105,7 @@ async def test_cache_bootstrap_accepts_matching_index() -> None:
         ],
         [
             "index_schema_version",
-            "3",
+            "4",
             "embedding_model",
             "test-embedding",
             "embedding_dimension",
@@ -122,7 +125,7 @@ async def test_cache_bootstrap_rejects_dimension_mismatch() -> None:
     client = FakeRedis(
         [
             "index_definition",
-            ["prefixes", ["rag-cache:semantic:v3:"]],
+            ["prefixes", ["rag-cache:semantic:v4:"]],
             "attributes",
             [
                 *_boundary_attributes(),
@@ -144,7 +147,7 @@ async def test_cache_bootstrap_rejects_dimension_mismatch() -> None:
         ],
         [
             "index_schema_version",
-            "3",
+            "4",
             "embedding_model",
             "test-embedding",
             "embedding_dimension",
@@ -163,7 +166,7 @@ async def test_cache_bootstrap_rejects_model_change_without_new_index() -> None:
     client = FakeRedis(
         [
             "index_definition",
-            ["prefixes", ["rag-cache:semantic:v3:"]],
+            ["prefixes", ["rag-cache:semantic:v4:"]],
             "attributes",
             [
                 *_boundary_attributes(),
@@ -185,7 +188,7 @@ async def test_cache_bootstrap_rejects_model_change_without_new_index() -> None:
         ],
         [
             "index_schema_version",
-            "3",
+            "4",
             "embedding_model",
             "different-model",
             "embedding_dimension",
@@ -209,7 +212,10 @@ async def test_cache_validation_does_not_create_a_missing_index() -> None:
     assert not any(command[0] == "FT.CREATE" for command in client.commands)
 
 
-@pytest.mark.parametrize("missing_field", ["filter_hash", "graph_version_hash", "graph_mode"])
+@pytest.mark.parametrize(
+    "missing_field",
+    ["filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref"],
+)
 @pytest.mark.asyncio
 async def test_cache_bootstrap_rejects_missing_boundary_tag_without_mutating_index(
     missing_field: str,
@@ -225,9 +231,9 @@ async def test_cache_bootstrap_rejects_missing_boundary_tag_without_mutating_ind
     ]
     attributes = [item for item in _boundary_attributes() if item[1] != missing_field]
     client = FakeRedis(
-        ["index_definition", ["prefixes", ["rag-cache:semantic:v3:"]],
+        ["index_definition", ["prefixes", ["rag-cache:semantic:v4:"]],
          "attributes", [*attributes, vector]],
-        ["index_schema_version", "3", "embedding_model", "test-embedding",
+        ["index_schema_version", "4", "embedding_model", "test-embedding",
          "embedding_dimension", "128", "vector_data_type", "FLOAT32"],
     )
 

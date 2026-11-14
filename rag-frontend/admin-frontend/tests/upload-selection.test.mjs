@@ -60,6 +60,7 @@ function workspace({ profiles = [], request } = {}) {
       if (name === '@/components/document-chunks') return { DocumentChunks: () => null };
       // 上传选择测试不发起图谱请求，图谱组件有独立状态与代理边界用例。
       if (name === '@/components/knowledge-graph-settings') return { KnowledgeGraphSettings: () => null };
+      if (name === '@/components/knowledge-graph-browser') return { KnowledgeGraphBrowser: () => null };
       return require(name);
     },
   });

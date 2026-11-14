@@ -179,11 +179,13 @@ async def test_real_redis_stack_version_boundaries_do_not_mix(
 
     assert await cache.get_semantic(changed_revision, original.normalized_question) == ()
     assert await cache.get_semantic(changed_model, original.normalized_question) == ()
-    # 同一问题向量在过滤、图谱代数和模式变化时也必须真正被Redis TAG隔离。
+    # 同一向量在过滤、图谱代数、证据模式和聚合策略变化时必须真正被Redis TAG隔离。
     for boundary in (
         replace(original.boundary, filter_hash="filter-fixture"),
         replace(original.boundary, graph_version_hash="graph-generation-fixture"),
         replace(original.boundary, graph_mode="native"),
+        replace(original.boundary, evidence_mode="community"),
+        replace(original.boundary, aggregate_profile_ref="rag-answer-community-localized@1"),
     ):
         assert await cache.get_exact(boundary, original.normalized_question) is None
         assert await cache.get_semantic(boundary, original.normalized_question) == ()

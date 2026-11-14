@@ -13,16 +13,18 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_service.domain.aggregate import from_payload, to_payload
 from rag_service.domain.errors import RagError
 from rag_service.domain.graph import GraphConfiguration, GraphState, GraphStatus
 from rag_service.infrastructure.postgres.graph_models import GraphStateRow
 
 
 def _state_values(value: GraphState) -> dict[str, Any]:
-    """把状态与受控配置转换为 ORM 字段，不序列化模型密钥或图谱生成正文。"""
+    """把状态与受控配置转换为 ORM 字段，仅持久化已核验报告，不序列化模型密钥。"""
     return {
         "security_scope_id": value.security_scope_id,
         "knowledge_base_id": value.knowledge_base_id,
+        "community_reports_json": [to_payload(report) for report in value.community_reports],
         "enabled": value.configuration.enabled,
         "profile_ref": value.configuration.profile_ref,
         "auto_build": value.configuration.auto_build,
@@ -50,6 +52,7 @@ def _to_domain(row: GraphStateRow) -> GraphState:
     return GraphState(
         security_scope_id=row.security_scope_id,
         knowledge_base_id=row.knowledge_base_id,
+        community_reports=tuple(from_payload(item) for item in row.community_reports_json),
         configuration=GraphConfiguration(
             enabled=row.enabled, profile_ref=row.profile_ref,
             auto_build=row.auto_build, retrieval_enabled=row.retrieval_enabled,

@@ -23,14 +23,20 @@ export function sanitizedSseBody(source: ReadableStream<Uint8Array>): ReadableSt
   let buffer = "";
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-      const blocks = buffer.split(/\r?\n\r?\n/u);
-      buffer = blocks.pop() ?? "";
-      for (const block of blocks) controller.enqueue(encoder.encode(`${sanitizeEventBlock(block)}\n\n`));
-      if (done) {
-        if (buffer.trim()) controller.enqueue(encoder.encode(`${sanitizeEventBlock(buffer)}\n\n`));
-        controller.close();
+      // 一次 pull 必须交付完整帧或 EOF。只缓存半帧就返回会让等待中的下游停住，
+      // 尤其聚合证据 JSON 较大，不能假设一次网络读取恰好包含整个 SSE 帧。
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const blocks = buffer.split(/\r?\n\r?\n/u);
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) controller.enqueue(encoder.encode(`${sanitizeEventBlock(block)}\n\n`));
+        if (done) {
+          if (buffer.trim()) controller.enqueue(encoder.encode(`${sanitizeEventBlock(buffer)}\n\n`));
+          controller.close();
+          return;
+        }
+        if (blocks.length) return;
       }
     },
     cancel() {
