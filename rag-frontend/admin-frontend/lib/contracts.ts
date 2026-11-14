@@ -102,7 +102,7 @@ export interface JobState {
 /** 原生图谱只提供受控知识库配置，模型凭据不属于浏览器契约。 */
 export interface GraphConfiguration {
   enabled: boolean;
-  profile_ref: 'native-graph-light@1';
+  profile_ref: 'native-graph-light@1' | 'native-graph-with-summaries@1';
   auto_build: boolean;
   retrieval_enabled: boolean;
 }
@@ -124,4 +124,76 @@ export interface KnowledgeGraphState {
   started_at: string | null;
   completed_at: string | null;
   updated_at: string;
+}
+
+/** 来源仅由 Gateway 映射到当前活动文档；摘要与节点描述不冒充原文。 */
+export interface GraphSource {
+  knowledge_base_id: string;
+  document_id: string;
+  document_name: string;
+  document_revision: number;
+  active_version_id: string | null;
+  chunk_id: string;
+  quote: string;
+  positions: SourcePosition[];
+}
+
+export interface AggregateEvidence {
+  aggregate_id: string;
+  label: string;
+  kind: 'community_aggregate';
+  derived: true;
+  origin: 'gateway_generated';
+  knowledge_base_id: string;
+  community_id: string;
+  title: string;
+  summary: string;
+  graph_generation: number;
+  content_revision: number;
+  configuration_version: number;
+  graph_profile_ref: string;
+  generator_model_ref: string;
+  strategy_ref: string;
+  sources: GraphSource[];
+}
+
+export interface GraphNode {
+  id: string;
+  name: string;
+  entity_type: string;
+  description: string;
+  generated: true;
+  sources: GraphSource[];
+  source_status: 'available' | 'unavailable';
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  description: string;
+  generated: true;
+  sources: GraphSource[];
+  source_status: 'available' | 'unavailable';
+}
+
+export interface GraphView {
+  knowledge_base_id: string;
+  status: GraphStatus;
+  graph_generation: number;
+  content_revision: number;
+  profile_ref: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  truncated: boolean;
+  warnings: string[];
+}
+
+export interface GraphCommunities {
+  knowledge_base_id: string;
+  status: GraphStatus;
+  graph_generation: number;
+  content_revision: number;
+  communities: AggregateEvidence[];
+  warnings: string[];
 }

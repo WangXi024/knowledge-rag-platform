@@ -304,6 +304,40 @@ button { cursor: pointer; }
 .graph-diagnostics dt { font-weight: 700; }
 .graph-diagnostics dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 
+/* 图谱只读视图使用有界 SVG 与等价列表，窄屏详情落到下方，不引入布局计算依赖。 */
+.graph-profile { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 18px 0; font-size: .875rem; }
+.graph-profile select, .graph-search input, .graph-search select { min-height: 38px; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; color: #34433e; }
+.graph-browser { margin-top: 20px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: white; }
+.graph-browser > header { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
+.graph-browser h2 { margin: 0; font-size: 1.125rem; }
+.graph-browser p { font-size: .875rem; line-height: 1.65; overflow-wrap: anywhere; }
+.graph-tabs { display: flex; gap: 8px; }
+.graph-tabs button, .graph-entity-list button, .graph-community-list button { padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfb; color: #34433e; text-align: left; }
+.graph-tabs button[aria-pressed="true"], .graph-entity-list button[aria-pressed="true"] { background: #e9f7ef; border-color: #6ba990; }
+.graph-search { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 18px 0; }
+.graph-search label { display: grid; gap: 7px; font-size: .875rem; }
+.graph-search label:first-child { flex: 1; min-width: 180px; }
+.graph-workbench { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(220px, 1fr); gap: 18px; margin-top: 18px; }
+.graph-workbench > * { min-width: 0; }
+.graph-canvas { width: 100%; max-height: 380px; background: #f7faf8; border-radius: 12px; }
+.graph-canvas line { stroke: #b5c9bf; stroke-width: 1; }
+.graph-canvas circle { fill: #33856b; stroke: white; stroke-width: 2; }
+.graph-canvas text { font-size: 11px; fill: #34433e; }
+.graph-canvas g { cursor: pointer; }
+.graph-canvas g:focus circle { stroke: #192d25; stroke-width: 3; }
+.graph-entity-list, .graph-source-list, .graph-community-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }
+.graph-entity-list small { color: #60736d; }
+.graph-source-list, .graph-community-list { flex-direction: column; }
+.graph-source-list button, .graph-community-list button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.graph-detail, .community-detail { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: #fcfdfc; }
+.graph-description-text { white-space: pre-wrap; }
+.generated-badge { display: inline-block; padding: 4px 8px; border-radius: 6px; background: #f0eafb; color: #6b488a; font-size: .75rem; }
+.community-detail { margin-top: 18px; }
+.community-detail dl { font-size: .8rem; overflow-wrap: anywhere; }
+.community-detail dt { font-weight: 700; margin-top: 12px; }
+.community-detail dd { margin: 4px 0 0; }
+@media (max-width: 760px) { .graph-workbench { grid-template-columns: minmax(0, 1fr); } .graph-browser { padding: 18px; } }
+
 @media (max-width: 1040px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .login-page { grid-template-columns: 42% 1fr; }

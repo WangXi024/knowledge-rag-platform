@@ -50,6 +50,7 @@ function workspace(request) {
       if (name === '@/components/document-chunks') return { DocumentChunks: () => null };
       // 此回归只验证删除流程，图谱管理由独立的行为测试覆盖。
       if (name === '@/components/knowledge-graph-settings') return { KnowledgeGraphSettings: () => null };
+      if (name === '@/components/knowledge-graph-browser') return { KnowledgeGraphBrowser: () => null };
       return require(name);
     },
   });

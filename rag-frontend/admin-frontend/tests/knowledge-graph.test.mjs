@@ -81,6 +81,7 @@ function mount(gatewayRequest, available = true, revision = 7) {
       const target = elements(render()).find((node) => node.type === 'label' && text(node).startsWith(label));
       elements(target).find((node) => node.type === 'input').props.onChange({ target: { checked } });
     },
+    profile: (value) => elements(render()).find((node) => node.type === 'select').props.onChange({ target: { value } }),
     save: () => elements(render()).find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }),
     tick: (delay) => {
       for (const [handle, timer] of [...timers]) if (timer.delay === delay) { timers.delete(handle); timer.callback(); }
@@ -130,6 +131,20 @@ test('build and cancel use separate asynchronous actions and preserve pending ca
   assert.match(view.html(), /不代表模型调用已经停止/);
   assert.equal(view.button('取消构建').props.disabled, true);
   assert.deepEqual(paths, ['', '/build', '/cancel'].map((suffix) => `v1/management/knowledge-bases/${id}/graph${suffix}`));
+  view.unmount();
+});
+
+test('saves the explicit summary profile without constructing arbitrary model parameters', async () => {
+  const calls = [];
+  const view = mount(async (_identity, path, options) => { calls.push({ path, options }); return response('NOT_BUILT'); });
+  view.html(); view.tick(0); await flush();
+  view.profile('native-graph-with-summaries@1');
+  assert.match(view.html(), /本平台.*社区摘要/);
+  assert.match(view.html(), /增加模型调用/);
+  view.save(); await flush();
+  const body = JSON.parse(JSON.stringify(calls[1].options.body));
+  assert.equal(body.profile_ref, 'native-graph-with-summaries@1');
+  assert.deepEqual(Object.keys(body).sort(), ['auto_build', 'enabled', 'profile_ref', 'retrieval_enabled']);
   view.unmount();
 });
 

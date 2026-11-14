@@ -34,12 +34,14 @@ import type {
   JobState,
   KnowledgeBase,
   KnowledgeDocument,
+  KnowledgeGraphState,
   PageEnvelope,
   ScopeType,
 } from '@/lib/contracts';
 import { errorMessage, GatewayError, gatewayRequest } from '@/lib/gateway-api';
 import { DocumentChunks } from '@/components/document-chunks';
 import { KnowledgeGraphSettings } from '@/components/knowledge-graph-settings';
+import { KnowledgeGraphBrowser } from '@/components/knowledge-graph-browser';
 
 export type AdminSection = 'overview' | 'knowledge' | 'documents';
 type Dialog = 'create' | 'edit' | 'upload' | 'reparse' | 'chunks' | null;
@@ -89,6 +91,7 @@ export function AdminWorkspace({
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [capabilities, setCapabilities] = useState<Capabilities>(EMPTY_CAPABILITIES);
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState('');
+  const [graphState, setGraphState] = useState<KnowledgeGraphState | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<KnowledgeDocument | null>(null);
   const [query, setQuery] = useState('');
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -597,12 +600,18 @@ export function AdminWorkspace({
             onCreate={() => setDialog('create')}
           />
           {selectedKnowledgeBase && (
+            <div>
             <KnowledgeGraphSettings
               key={`${session.tenantId}:${session.userId}:${scope}:${selectedKnowledgeBase.id}`}
               session={session}
               knowledgeBase={selectedKnowledgeBase}
               available={capabilities.features.native_graphrag === true}
+              onStateChange={setGraphState}
             />
+            <KnowledgeGraphBrowser key={`browse:${session.tenantId}:${session.userId}:${scope}:${selectedKnowledgeBase.id}`}
+              session={session} knowledgeBase={selectedKnowledgeBase}
+              state={graphState?.knowledge_base_id === selectedKnowledgeBase.id ? graphState : null} />
+            </div>
           )}
         </>
       )}

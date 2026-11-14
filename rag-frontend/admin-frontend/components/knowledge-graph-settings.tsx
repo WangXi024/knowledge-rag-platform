@@ -1,6 +1,6 @@
 'use client';
 
-/** 知识库图谱管理：保存受控配置并跟踪真实异步状态，不提供二期图谱浏览。 */
+/** 知识库图谱管理：保存受控配置并跟踪真实异步状态，浏览内容由只读面板加载。 */
 import { LoaderCircle, Network, RefreshCw } from 'lucide-react';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import type { AdminSession, ApiEnvelope, GraphConfiguration, GraphStatus, KnowledgeBase, KnowledgeGraphState } from '@/lib/contracts';
@@ -20,10 +20,11 @@ function displayTime(value: string | null): string {
 }
 
 /** 父组件按身份和知识库重挂载；请求序号额外阻止迟到读响应覆盖新的写操作。 */
-export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
+export function KnowledgeGraphSettings({ session, knowledgeBase, available, onStateChange }: {
   session: AdminSession;
   knowledgeBase: KnowledgeBase;
   available: boolean;
+  onStateChange?: (state: KnowledgeGraphState | null) => void;
 }) {
   const [state, setState] = useState<KnowledgeGraphState | null>(null);
   const [draft, setDraft] = useState<GraphConfiguration | null>(null);
@@ -36,6 +37,8 @@ export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
   const sequence = useRef(0);
   const dirtyRef = useRef(false);
   const path = `v1/management/knowledge-bases/${knowledgeBase.id}/graph`;
+
+  useEffect(() => { onStateChange?.(state); }, [state, onStateChange]);
 
   useEffect(() => {
     mounted.current = true;
@@ -101,12 +104,20 @@ export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
     }
   }
 
-  /** 草稿固定使用已批准的 light@1 策略，浏览器不接收任意上游 Parser 参数。 */
+  /** 开关与不可变策略分别保存；浏览器不接收任意上游 Parser/模型参数。 */
   function change(field: 'enabled' | 'auto_build' | 'retrieval_enabled', value: boolean) {
     if (!draft) return;
     dirtyRef.current = true;
     setDirty(true);
     setDraft({ ...draft, [field]: value });
+    setNotice('');
+  }
+
+  function changeProfile(value: string) {
+    if (!draft || (value !== 'native-graph-light@1' && value !== 'native-graph-with-summaries@1')) return;
+    dirtyRef.current = true;
+    setDirty(true);
+    setDraft({ ...draft, profile_ref: value });
     setNotice('');
   }
 
@@ -143,9 +154,14 @@ export function KnowledgeGraphSettings({ session, knowledgeBase, available }: {
           {status === 'STALE' && <p className="graph-note">现有图谱与当前内容版本不一致，完成重建前不会作为当前图谱参与检索。</p>}
           {state.last_error && <p className="graph-error" role="alert">{state.last_error.message}（{state.last_error.code}）</p>}
           <form onSubmit={(event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void submit('configuration'); }}>
+            <label className="graph-profile"><span>构图策略</span><select value={draft.profile_ref} disabled={Boolean(busy) || !available || !draft.enabled} onChange={(event) => changeProfile(event.target.value)}>
+              <option value="native-graph-light@1">轻量图谱 · 原文导航</option>
+              <option value="native-graph-with-summaries@1">图谱与本平台生成社区摘要</option>
+            </select></label>
+            {draft.profile_ref === 'native-graph-with-summaries@1' && <p className="graph-note">社区摘要由本平台基于原生图和当前原文生成，会增加模型调用。它是派生内容，来源仍须逐条核验；不是 RAGFlow 原生社区报告。</p>}
             <fieldset disabled={Boolean(busy)}>
               <legend className="sr-only">知识库图谱配置</legend>
-              <label><input type="checkbox" checked={draft.enabled} disabled={!available && !draft.enabled} onChange={(event) => change('enabled', event.target.checked)} /><span><strong>启用知识图谱</strong><small>使用标准轻量构图策略</small></span></label>
+              <label><input type="checkbox" checked={draft.enabled} disabled={!available && !draft.enabled} onChange={(event) => change('enabled', event.target.checked)} /><span><strong>启用知识图谱</strong><small>按所选受控策略构建</small></span></label>
               <label><input type="checkbox" checked={draft.auto_build} disabled={!draft.enabled} onChange={(event) => change('auto_build', event.target.checked)} /><span><strong>自动构建</strong><small>保存配置与文档变更后自动安排构建</small></span></label>
               <label><input type="checkbox" checked={draft.retrieval_enabled} disabled={!draft.enabled} onChange={(event) => change('retrieval_enabled', event.target.checked)} /><span><strong>用于问答检索</strong><small>仅当前内容版本的可用图谱参与检索</small></span></label>
             </fieldset>
