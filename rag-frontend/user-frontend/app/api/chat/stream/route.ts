@@ -2,6 +2,7 @@
 import { getAuthenticatedUser } from "@/lib/auth";
 import { friendlyError, gatewayFetch } from "@/lib/gateway";
 import { sanitizedSseBody } from "@/lib/sse";
+import { requestedEvidenceMode } from "@/lib/aggregate-evidence";
 
 export async function POST(request: Request): Promise<Response> {
   const user = await getAuthenticatedUser(request);
@@ -10,6 +11,8 @@ export async function POST(request: Request): Promise<Response> {
     const body = (await request.json()) as Record<string, unknown>;
     const query = String(body.query ?? "").trim();
     if (!query || query.length > 8000) return Response.json({ error: "请输入有效问题" }, { status: 400 });
+    const evidenceMode = requestedEvidenceMode(body.evidenceMode);
+    if (!evidenceMode) return Response.json({ error: "证据模式无效" }, { status: 400 });
     const responseLanguage = body.responseLanguage === "en-US" ? "en-US" : "zh-CN";
     const messages = Array.isArray(body.messages) ? body.messages.slice(-12) : [];
     const upstream = await gatewayFetch(user, "/v1/answers/stream", {
@@ -24,6 +27,7 @@ export async function POST(request: Request): Promise<Response> {
         // 普通用户端只引用稳定的通用 Profile；真实供应商、地址和密钥全部由后端环境注入。
         generation_profile: "answer-openai-compatible@4",
         response_language: responseLanguage,
+        evidence_mode: evidenceMode,
       }),
       signal: request.signal,
     });

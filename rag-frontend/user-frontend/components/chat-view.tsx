@@ -10,7 +10,9 @@ import { BookOpen, ChevronLeft, ChevronRight, Clock3, FileSearch, History, Langu
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { CacheType, Candidate, ChatMessage, Citation, ConversationSummary, EvidenceBundle } from "@/lib/ui-types";
+import type { AggregateEvidence, CacheType, Candidate, ChatMessage, Citation, ConversationSummary, EvidenceBundle, EvidenceMode } from "@/lib/ui-types";
+import { historicalAggregateEvidence, mergeAggregateEvidence } from '@/lib/aggregate-evidence';
+import { AggregateEvidenceCards } from '@/components/aggregate-evidence';
 
 /**
  * 单个浏览器页面最多允许两个会话同时生成答案。
@@ -77,7 +79,7 @@ function normalize(value: string): string {
 }
 
 function emptyEvidence(): EvidenceBundle {
-  return { candidates: [], citations: [], durationMs: null, total: 0, cacheType: null };
+  return { candidates: [], citations: [], durationMs: null, total: 0, cacheType: null, aggregateEvidence: [], evidenceMode: 'original' };
 }
 
 function reconcileEvidence(
@@ -85,6 +87,8 @@ function reconcileEvidence(
   citations: Citation[],
   durationMs: number | null,
   cacheType: CacheType | null,
+  aggregateEvidence: AggregateEvidence[] = [],
+  evidenceMode: EvidenceMode = 'original',
 ): EvidenceBundle {
   // 将 retrieve 候选与 answer 引用按文档/块关联，形成可翻页且不重复的证据集合。
   const resolved = candidates.map((candidate) => ({ ...candidate }));
@@ -116,7 +120,7 @@ function reconcileEvidence(
       });
     }
   }
-  return { candidates: resolved, citations, durationMs, total: candidates.length, cacheType };
+  return { candidates: resolved, citations, durationMs, total: candidates.length, cacheType, aggregateEvidence, evidenceMode };
 }
 
 function score(value: number | null): string {
@@ -147,7 +151,7 @@ function markdownWithCitationLinks(content: string): string {
       return line;
     }
     if (fence !== null) return line;
-    return line.replace(/\[(C\d+)\](?!\()/gu, "[$1](#rag-citation-$1)");
+    return line.replace(/\[([CA]\d+)\](?!\()/gu, "[$1](#rag-citation-$1)");
   }).join("\n");
 }
 
@@ -161,9 +165,9 @@ function markdownWithCitationLinks(content: string): string {
  */
 const markdownComponents: Components = {
   a: ({ href, children }) => {
-    const citation = href?.match(/^#rag-citation-(C\d+)$/u)?.[1];
+    const citation = href?.match(/^#rag-citation-([CA]\d+)$/u)?.[1];
     if (citation) {
-      return <button type="button" className="citation-chip" data-citation={citation}>{children}</button>;
+      return <button type="button" className={`citation-chip${citation.startsWith('A') ? ' aggregate-chip' : ''}`} data-citation={citation}>{children}</button>;
     }
     const external = href?.startsWith("http://") || href?.startsWith("https://");
     return <a href={href} target={external ? "_blank" : undefined} rel={external ? "noreferrer noopener" : undefined}>{children}</a>;
@@ -204,7 +208,8 @@ function parseHistoryMessages(data: unknown): ChatMessage[] {
       role: row.role === "assistant" ? "assistant" : "user",
       content: String(row.content || ""),
       evidence: row.role === "assistant" && row.evidence && typeof row.evidence === "object"
-        ? row.evidence as EvidenceBundle
+        ? { ...emptyEvidence(), ...(row.evidence as EvidenceBundle),
+          aggregateEvidence: historicalAggregateEvidence((row.evidence as EvidenceBundle).aggregateEvidence) }
         : undefined,
       requestId: row.requestId ? String(row.requestId) : null,
     };
@@ -223,6 +228,7 @@ export function ChatView() {
     () => new Set(),
   );
   const [responseLanguage, setResponseLanguage] = useState<"zh-CN" | "en-US">("zh-CN");
+  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>('original');
   const [activeEvidence, setActiveEvidence] = useState<string>();
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
@@ -391,6 +397,8 @@ export function ChatView() {
     event.preventDefault();
     const query = question.trim();
     const runKey = activeConversationKey;
+    // 与语言一样冻结在本次会话请求中，后续切换选择不能改变已在运行的证据模式。
+    const modeForRun = evidenceMode;
     // 历史消息尚未加载完成时不能追加新问题，否则稍后返回的历史响应会覆盖刚创建的
     // 流式消息。这个前置判断把“加载旧消息”和“追加新一轮”严格串行在同一会话内；
     // 它不会影响其他已经加载完成的会话并行回答。
@@ -415,7 +423,7 @@ export function ChatView() {
       messages: [
         ...current.messages,
         userMessage,
-        { id: assistantId, role: "assistant", content: "", streaming: true },
+        { id: assistantId, role: "assistant", content: "", streaming: true, evidenceMode: modeForRun },
       ],
     }));
 
@@ -443,11 +451,12 @@ export function ChatView() {
     let requestId = "";
     let cacheType: CacheType | null = null;
     const citations: Citation[] = [];
+    let aggregateEvidence: AggregateEvidence[] = [];
     try {
       const response = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ query, messages: [], responseLanguage: languageForRun }),
+        body: JSON.stringify({ query, messages: [], responseLanguage: languageForRun, evidenceMode: modeForRun }),
         signal: controller.signal,
       });
       if (response.status === 401) { window.location.href = "/login"; return; }
@@ -479,6 +488,13 @@ export function ChatView() {
             }));
           }
           if (eventName === "citation" && data.citation) citations.push(data.citation as Citation);
+          if (eventName === 'aggregate.evidence' && data.evidence) {
+            aggregateEvidence = mergeAggregateEvidence(aggregateEvidence, data.evidence);
+          }
+          if (eventName === 'completed' && Array.isArray(data.aggregate_evidence)) {
+            // completed 是最终核验后的权威集合；空集合也必须清掉先前缓冲的摘要。
+            aggregateEvidence = mergeAggregateEvidence([], data.aggregate_evidence);
+          }
           if (
             eventName === "completed"
             && (data.cache_type === "none" || data.cache_type === "exact" || data.cache_type === "semantic")
@@ -496,6 +512,8 @@ export function ChatView() {
         citations,
         retrieved.durationMs ?? null,
         cacheType,
+        aggregateEvidence,
+        modeForRun,
       );
       updateConversationView(runKey, (current) => ({
         ...current,
@@ -588,6 +606,7 @@ export function ChatView() {
             <span className="assistant-mark"><Sparkles size={18} /></span><div><strong>知识问答</strong><small>答案来自你上传的文件</small></div>
           </div>
           <div className="conversation-tools">
+            <label>证据<select aria-label="回答证据模式" value={evidenceMode} onChange={(event) => setEvidenceMode(event.target.value as EvidenceMode)}><option value="original">原文引用</option><option value="community">原文 + 社区摘要</option></select></label>
             <label><Languages size={15} /><select value={responseLanguage} onChange={(event) => setResponseLanguage(event.target.value as "zh-CN" | "en-US")}><option value="zh-CN">中文回答</option><option value="en-US">English</option></select></label>
             <button className="icon-action" onClick={() => setEvidenceOpen((value) => !value)} title={evidenceOpen ? "收起引用" : "展开引用"}>{evidenceOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
           </div>
@@ -603,11 +622,12 @@ export function ChatView() {
               <div className="message-avatar">{message.role === "user" ? "我" : <Sparkles size={16} />}</div>
               <div className="message-body">
                 <small>{message.role === "user" ? "你" : "LazyTT"}</small>
-                {message.role === "assistant" ? <AnswerContent content={message.content || "正在检索并组织答案…"} onCitation={(label) => showCitation(label, message.evidence)} /> : <div className="user-copy">{message.content}</div>}
+                {message.role === "assistant" ? <AnswerContent content={message.content || (message.evidenceMode === 'community' ? '正在核验聚合来源，再组织答案…' : '正在检索并组织答案…')} onCitation={(label) => showCitation(label, message.evidence)} /> : <div className="user-copy">{message.content}</div>}
                 {message.streaming ? <span className="streaming-cursor" /> : null}
                 {message.role === "assistant" && message.evidence?.citations.length ? (
                   <div className="answer-citations">{message.evidence.citations.map((citation) => <button key={citation.citation_id} onClick={() => showCitation(citation.label, message.evidence)}>{citation.label}</button>)}</div>
                 ) : null}
+                {message.role === 'assistant' && Boolean(message.evidence?.aggregateEvidence?.length) && <div className="answer-citations">{message.evidence!.aggregateEvidence!.map((item) => <button className="aggregate-chip" key={item.aggregate_id} onClick={() => showCitation(item.label, message.evidence)}>{item.label} · 生成摘要</button>)}</div>}
               </div>
             </article>
           ))}
@@ -644,6 +664,7 @@ export function ChatView() {
         <div className="evidence-head"><div><span className="eyebrow">SOURCES</span><h2>检索与引用</h2></div><button className="icon-action" onClick={() => setEvidenceOpen(false)}><PanelRightClose size={17} /></button></div>
         <div className="cache-status" aria-label="回答缓存状态">
           <small><strong>回答来源</strong>{cacheSourceLabel(evidence.cacheType)}</small>
+          {evidence.evidenceMode === 'community' && <small>{evidence.aggregateEvidence?.length ? '含本平台生成社区摘要；原文与摘要分开展示' : '暂无可用社区摘要，可切换到原文模式提问'}</small>}
           <small>
             精准缓存：{evidence.cacheType === null || evidence.cacheType === undefined ? "未记录" : evidence.cacheType === "exact" ? "已命中" : "未命中"}
             <i aria-hidden="true">·</i>
@@ -655,6 +676,7 @@ export function ChatView() {
           {evidence.durationMs !== null ? <span><Clock3 size={13} /><strong>{Math.round(evidence.durationMs)}</strong> ms</span> : null}
         </div>
         <div className="evidence-list">
+          <AggregateEvidenceCards items={evidence.aggregateEvidence ?? []} activeLabel={activeEvidence} />
           {evidence.candidates.length ? evidence.candidates.map((candidate, index) => {
             const label = candidate.citationLabel || String(index + 1);
             return (

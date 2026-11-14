@@ -1,12 +1,12 @@
 /**
  * 共享文档切块接口：由后端访问策略验证文档可读后，分页返回纯文本和页码。
- * RAGFlow Chunk ID、坐标、Metadata 与内部错误不会穿透到浏览器。
+ * 只返回公开切块身份、正文和页码，不返回内部 Metadata 或错误正文。
  */
 import { getAuthenticatedUser } from "@/lib/auth";
 import { GatewayError, gatewayJson } from "@/lib/gateway";
 
 type Context = { params: Promise<{ documentId: string }> };
-type GatewayDocumentResponse = { data: { id: string; knowledge_base_id: string } };
+type GatewayDocumentResponse = { data: { id: string; knowledge_base_id: string; document_revision: number; active_version_id: string | null } };
 type GatewayChunkPage = {
   data: Array<{
     id: string;
@@ -32,16 +32,25 @@ export async function GET(request: Request, context: Context): Promise<Response>
   if (!user) return Response.json({ error: "身份信息已失效" }, { status: 401 });
   try {
     const { documentId } = await context.params;
-    await gatewayJson<GatewayDocumentResponse>(
+    const document = await gatewayJson<GatewayDocumentResponse>(
       user,
       `/v1/documents/${encodeURIComponent(documentId)}`,
     );
     const url = new URL(request.url);
+    const revision = url.searchParams.get("document_revision");
+    if (revision !== null && (!/^(0|[1-9][0-9]*)$/u.test(revision) || !Number.isSafeInteger(Number(revision)))) {
+      return Response.json({ error: "来源修订无效" }, { status: 400 });
+    }
+    const activeVersion = url.searchParams.get("active_version_id");
+    if ((revision !== null && Number(revision) !== document.data.document_revision)
+        || (activeVersion !== null && activeVersion !== document.data.active_version_id)) {
+      return Response.json({ error: "来源版本已变化，请重新提问" }, { status: 409 });
+    }
     const page = positiveInteger(url.searchParams.get("page"), 1, 10_000);
     const pageSize = positiveInteger(url.searchParams.get("page_size"), 20, 100);
     const response = await gatewayJson<GatewayChunkPage>(
       user,
-      `/v1/documents/${encodeURIComponent(documentId)}/chunks?page=${page}&page_size=${pageSize}`,
+      `/v1/documents/${encodeURIComponent(documentId)}/chunks?page=${page}&page_size=${pageSize}${revision ? `&document_revision=${revision}` : ''}`,
     );
     const data = response.data.map((item) => ({
       id: item.id,
@@ -65,6 +74,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
     if (error instanceof GatewayError && error.status === 404) {
       return Response.json({ error: "文档不存在" }, { status: 404 });
     }
+    if (error instanceof GatewayError && error.status === 409) return Response.json({ error: "来源版本已变化，请重新提问" }, { status: 409 });
     return Response.json({ error: "内容片段暂时不可用，请稍后重试" }, { status: 503 });
   }
 }
