@@ -1915,6 +1915,20 @@ class SqlAlchemyQueryRepository:
         )
         return _citation_to_domain(row) if row is not None else None
 
+    async def get_citation_request_id(
+        self,
+        security_scope_id: str,
+        citation_id: UUID,
+    ) -> UUID | None:
+        """只在当前主体范围读取所属请求，不通过全局引用 ID 泄漏其他请求是否存在。"""
+        request_id: UUID | None = await self._session.scalar(
+            select(CitationRecordRow.request_id).where(
+                CitationRecordRow.security_scope_id == security_scope_id,
+                CitationRecordRow.id == citation_id,
+            )
+        )
+        return request_id
+
     async def add_feedback(
         self,
         security_scope_id: str,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -609,6 +610,19 @@ class MemoryQueries:
                 for value in values:
                     if value.citation_id == citation_id:
                         return value
+        return None
+
+    async def get_citation_request_id(
+        self,
+        security_scope_id: str,
+        citation_id: UUID,
+    ) -> UUID | None:
+        """引用所属请求也先检查范围，不能让单条引用路径绕开社区历史校验。"""
+        for request_id, citations in self.citations.items():
+            if await self.get(security_scope_id, request_id) is not None and any(
+                citation.citation_id == citation_id for citation in citations
+            ):
+                return request_id
         return None
 
     async def add_feedback(
@@ -3395,7 +3409,7 @@ async def test_community_generation_change_is_refused_and_never_cached_or_stream
             events = [event async for event in service.stream_answer(_security(), value)]
             assert events[0].event == "accepted" and events[-1].event == "completed"
             assert events[-1].data["outcome"] == "refused"
-            assert not any(event.event == "aggregate" for event in events)
+            assert not any(event.event == "aggregate.evidence" for event in events)
             assert not any("DO NOT LEAK" in str(event.data) for event in events)
         else:
             result = await service.answer(_security(), value)
@@ -3520,14 +3534,33 @@ async def test_community_success_sse_persists_aggregate_before_completed_and_red
     )
     port = _community_port(service, kb, doc)
     value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
-    stream = service.stream_answer(_security(), value)
-    events = []
-    async for event in stream:
-        events.append(event)
-        if event.event == "completed":
+
+    async def connected() -> bool:
+        """保持合成客户端连接，直接验证 HTTP SSE 封装产出的真实文本帧。"""
+        return False
+
+    stream = _stream_sse_events(
+        stream=service.stream_answer(_security(), value),
+        request_id=value.request_id,
+        heartbeat_seconds=0.5,
+        disconnected=connected,
+    )
+    frames = []
+    async for frame in stream:
+        frames.append(frame)
+        if frame.startswith("event: completed\n"):
             break
     await stream.aclose()
-    assert [item.event for item in events].count("aggregate") == 1
+    aggregate_frames = [
+        frame for frame in frames if frame.startswith("event: aggregate.evidence\n")
+    ]
+    assert len(aggregate_frames) == 1
+    assert not any(frame.startswith("event: aggregate\n") for frame in frames)
+    aggregate_payload = json.loads(
+        next(line[6:] for line in aggregate_frames[0].splitlines() if line.startswith("data: "))
+    )
+    assert aggregate_payload["evidence"]["label"] == "A1"
+    assert aggregate_payload["evidence"]["sources"][0]["quote"] == port.evidence.sources[0].quote
     record = queries.records[value.request_id]
     assert record.request_status == QueryStatus.COMPLETED and len(record.aggregate_evidence) == 1
     assert record.answer_text == "Atlas links two sources. [A1]"
@@ -3537,3 +3570,89 @@ async def test_community_success_sse_persists_aggregate_before_completed_and_red
     assert record.answer_text and record.aggregate_evidence
     with pytest.raises(ResourceNotFoundError):
         await service.get_request(_security("another-tenant"), value.request_id)
+
+
+@pytest.mark.asyncio
+async def test_community_citation_endpoints_hide_revoked_sources_but_retain_private_audit(
+    service_settings: ServiceSettings,
+) -> None:
+    """社区失效投影必须同时约束 C 列表和单条入口；私有原始审计不因此丢失。"""
+    queries = SnapshotQueries()
+    service, engine, _, kb, doc = _service(
+        service_settings, llm_responses=["Atlas is supported by both sources. [A1] [C1]"],
+        queries=queries,
+    )
+    port = _community_port(service, kb, doc)
+    source = port.evidence.sources[0]
+    engine.vector = (
+        replace(engine.vector[0], content=source.quote, engine_chunk_id=source.engine_chunk_id),
+    )
+    engine.term = engine.vector
+    value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    result = await service.answer(_security(), value)
+    citation = result.citations[0]
+    assert await service.list_request_citations(_security(), value.request_id) == (citation,)
+    assert await service.get_citation(_security(), citation.citation_id) == citation
+    with pytest.raises(ResourceNotFoundError) as cross_scope:
+        await service.get_citation(_security("other-tenant"), citation.citation_id)
+    with pytest.raises(ResourceNotFoundError):
+        await service.list_request_citations(_security("other-tenant"), value.request_id)
+    assert cross_scope.value.code == "RAG-CITATION-001"
+
+    port.valid = False
+    assert await service.list_request_citations(_security(), value.request_id) == ()
+    with pytest.raises(ResourceNotFoundError) as revoked:
+        await service.get_citation(_security(), citation.citation_id)
+    with pytest.raises(ResourceNotFoundError) as unknown:
+        await service.get_citation(_security(), uuid4())
+    assert revoked.value.code == unknown.value.code == cross_scope.value.code
+    assert queries.citations[value.request_id] == (citation,)
+    assert queries.records[value.request_id].answer_text == result.answer
+    assert queries.records[value.request_id].aggregate_evidence == result.aggregate_evidence
+
+
+@pytest.mark.asyncio
+async def test_original_historical_citations_keep_their_existing_snapshot_behavior(
+    service_settings: ServiceSettings,
+) -> None:
+    """原文历史兼容不扩展撤销策略；仅社区证据需要当前报告来源复核。"""
+    queries = MemoryQueries()
+    service, _, _, kb, doc = _service(
+        service_settings, llm_responses=["Historical original text. [C1]"], queries=queries
+    )
+    value = AnswerInput((kb.id,), "What is Atlas?")
+    result = await service.answer(_security(), value)
+    citation = result.citations[0]
+    doc.status = DocumentStatus.DELETED
+    kb.status = KnowledgeBaseStatus.DELETING
+    port = _community_port(service, kb, doc)
+    port.valid = False
+
+    assert await service.list_request_citations(_security(), value.request_id) == (citation,)
+    assert await service.get_citation(_security(), citation.citation_id) == citation
+    assert (await service.get_request(_security(), value.request_id)).answer_text == result.answer
+    assert port.validations == 0
+    with pytest.raises(ResourceNotFoundError):
+        await service.list_request_citations(_security("other-tenant"), value.request_id)
+    with pytest.raises(ResourceNotFoundError) as cross_scope:
+        await service.get_citation(_security("other-tenant"), citation.citation_id)
+    assert cross_scope.value.code == "RAG-CITATION-001"
+
+
+@pytest.mark.asyncio
+async def test_citation_owner_disappearing_uses_the_same_citation_not_found_error(
+    service_settings: ServiceSettings,
+) -> None:
+    """所属请求在两次读取之间消失时不能通过 Query 错误码暴露关联信息。"""
+    class MissingOwnerQueries(MemoryQueries):
+        async def get_citation_request_id(
+            self, security_scope_id: str, citation_id: UUID
+        ) -> UUID | None:
+            return uuid4()
+
+    service, _, _, _, _ = _service(
+        service_settings, llm_responses=[], queries=MissingOwnerQueries()
+    )
+    with pytest.raises(ResourceNotFoundError) as missing:
+        await service.get_citation(_security(), uuid4())
+    assert missing.value.code == "RAG-CITATION-001"

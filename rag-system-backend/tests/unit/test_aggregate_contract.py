@@ -83,8 +83,9 @@ def test_aggregate_codec_and_public_projection_keep_original_source_identity() -
         assert not {"resource_scope_id", "engine_document_id", "quote_sha256"}.intersection(source)
     frame = stream_event_json(
         request_id=uuid4(), sequence=1,
-        event=StreamEvent("aggregate", {"evidence": evidence}),
+        event=StreamEvent("aggregate.evidence", {"evidence": evidence}),
     )
+    assert frame.startswith("event: aggregate.evidence\n")
     data = json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
     assert data["evidence"] == public
 
@@ -240,3 +241,19 @@ async def test_query_repository_add_update_and_read_preserve_aggregate_snapshot(
     assert values["evidence_mode"] == "community"
     assert values["aggregate_profile_ref"] == AGGREGATE_PROFILE_REF
     assert values["aggregate_evidence_json"] == [to_payload(evidence)]
+
+
+@pytest.mark.asyncio
+async def test_citation_owner_sql_lookup_always_contains_the_callers_scope() -> None:
+    """实际 SQL 同时绑定引用 ID 与主体范围，不能只靠应用层先查一次权限。"""
+    session = AsyncMock(spec=AsyncSession)
+    request_id, citation_id = uuid4(), uuid4()
+    session.scalar.return_value = request_id
+    repository = SqlAlchemyQueryRepository(session)
+    assert await repository.get_citation_request_id("a" * 64, citation_id) == request_id
+    statement = session.scalar.call_args.args[0]
+    assert list(statement.selected_columns.keys()) == ["request_id"]
+    assert statement.compile().params == {
+        "security_scope_id_1": "a" * 64,
+        "id_1": citation_id,
+    }

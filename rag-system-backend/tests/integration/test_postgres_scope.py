@@ -586,6 +586,9 @@ async def test_query_citation_and_feedback_are_scope_qualified(
     assert loaded is not None and loaded.outcome == AnswerOutcome.SUCCESS
     assert await queries.get("0" * 64, request_id) is None
     assert await queries.get_citation("0" * 64, citation.citation_id) is None
+    assert await queries.get_citation_request_id(scope, citation.citation_id) == request_id
+    assert await queries.get_citation_request_id("0" * 64, citation.citation_id) is None
+    assert await queries.get_citation_request_id(scope, uuid4()) is None
     assert (await queries.list_citations(scope, request_id))[0].label == "C1"
 
 
@@ -1125,3 +1128,59 @@ async def test_graph_followup_job_commits_under_old_lease_in_one_transaction(
     assert current.target_content_revision == kb.revision + 1
     assert (await jobs.get(scope, job.id)).status == JobStatus.SUCCEEDED
     assert (await jobs.get(scope, current.job_id)).status == JobStatus.PENDING
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_community_report_and_query_evidence_roundtrip_in_real_postgresql(
+    database_session: AsyncSession,
+) -> None:
+    """真实JSONB往返保留活动来源/模型/版本，调用主体与资源Scope分离且跨主体不可读。"""
+    import hashlib
+
+    from rag_service.domain.aggregate import AggregateEvidence, AggregateSource
+
+    resource_scope, principal_scope = "b" * 64, "a" * 64
+    kb = KnowledgeBase(
+        resource_scope, "community-json-fixture", "office-default@1", "general-256@2",
+        "embedding-openai-compatible@3", "hybrid-structure-aware@6",
+        status=KnowledgeBaseStatus.READY,
+    )
+    await SqlAlchemyKnowledgeBaseRepository(database_session).add(resource_scope, kb)
+    sources = tuple(AggregateSource(
+        kb.id, uuid4(), f"fixture-{index}.txt", f"native-{index}", "Synthetic original",
+        resource_scope, 1, uuid4(), f"document-{index}",
+        hashlib.sha256(b"Synthetic original").hexdigest(),
+    ) for index in (1, 2))
+    summary = "Synthetic generated community summary."
+    report = AggregateEvidence(
+        uuid4(), "A1", kb.id, "community", "Synthetic", summary, 1, kb.revision, 0,
+        "native-graph-with-summaries@1", hashlib.sha256(summary.encode()).hexdigest(),
+        sources, resource_scope, "synthetic-model",
+    )
+    state = GraphState(
+        resource_scope, kb.id,
+        configuration=GraphConfiguration(True, "native-graph-with-summaries@1", False, True),
+        status=GraphStatus.READY, graph_generation=1, built_for_revision=kb.revision,
+        community_reports=(report,),
+    )
+    graphs = SqlAlchemyGraphRepository(database_session)
+    await graphs.add(resource_scope, state)
+    loaded_graph = await graphs.get(resource_scope, kb.id)
+    assert loaded_graph.community_reports == (report,)
+    assert await graphs.get("f" * 64, kb.id) is None
+    record = QueryRecord(
+        security_scope_id=principal_scope, request_id=uuid4(), query_sha256="c" * 64,
+        knowledge_base_ids=(kb.id,), retrieval_profile_ref="hybrid-structure-aware@6",
+        request_status=QueryStatus.COMPLETED, outcome=AnswerOutcome.SUCCESS,
+        answer_text="Verified multi-source answer [A1]", evidence_mode="community",
+        aggregate_profile_ref="rag-answer-community-localized@1",
+        aggregate_evidence=(report,),
+    )
+    queries = SqlAlchemyQueryRepository(database_session)
+    await queries.add(principal_scope, record)
+    loaded_query = await queries.get(principal_scope, record.request_id)
+    assert loaded_query.aggregate_evidence == record.aggregate_evidence
+    assert loaded_query.evidence_mode == "community"
+    assert loaded_query.aggregate_profile_ref == record.aggregate_profile_ref
+    assert await queries.get(resource_scope, record.request_id) is None

@@ -1119,7 +1119,7 @@ class OnlineService:
                     citation = event.data.get("citation")
                     if isinstance(citation, Citation):
                         citations.append(citation)
-                elif event.event == "aggregate":
+                elif event.event == "aggregate.evidence":
                     evidence = event.data.get("evidence")
                     if isinstance(evidence, AggregateEvidence):
                         record.aggregate_evidence = (*record.aggregate_evidence, evidence)
@@ -1498,7 +1498,7 @@ class OnlineService:
         for citation in result.citations:
             yield StreamEvent("citation", {"citation": citation})
         for evidence in result.aggregate_evidence:
-            yield StreamEvent("aggregate", {"evidence": evidence})
+            yield StreamEvent("aggregate.evidence", {"evidence": evidence})
         if result.usage is not None:
             yield StreamEvent("usage", {"usage": result.usage})
         yield StreamEvent(
@@ -1579,8 +1579,12 @@ class OnlineService:
         security: SecurityContext,
         request_id: UUID,
     ) -> tuple[Citation, ...]:
-        """确认请求归属后列出其实际使用引用。"""
-        await self.get_request(security, request_id)
+        """确认请求归属后返回引用；失效社区的 C 不得绕过已隐藏的回答/A 证据。"""
+        record = await self.get_request(security, request_id)
+        if record.evidence_mode == "community" and (
+            record.outcome != AnswerOutcome.SUCCESS or not record.aggregate_evidence
+        ):
+            return ()
         assert self._queries is not None
         return await self._queries.list_citations(
             security.security_scope_id,
@@ -1592,8 +1596,22 @@ class OnlineService:
         security: SecurityContext,
         citation_id: UUID,
     ) -> Citation:
-        """按安全范围读取单条引用，隐藏跨租户引用是否存在。"""
+        """按安全范围读取单条引用，社区来源失效与跨范围引用均统一不可见。"""
         if self._queries is None:
+            raise ResourceNotFoundError("RAG-CITATION-001", "引用不存在")
+        request_id = await self._queries.get_citation_request_id(
+            security.security_scope_id, citation_id
+        )
+        if request_id is None:
+            raise ResourceNotFoundError("RAG-CITATION-001", "引用不存在")
+        try:
+            record = await self.get_request(security, request_id)
+        except ResourceNotFoundError as error:
+            # 所属请求损坏/消失与未知引用使用同一错误，避免从错误码探测请求关系。
+            raise ResourceNotFoundError("RAG-CITATION-001", "引用不存在") from error
+        if record.evidence_mode == "community" and (
+            record.outcome != AnswerOutcome.SUCCESS or not record.aggregate_evidence
+        ):
             raise ResourceNotFoundError("RAG-CITATION-001", "引用不存在")
         value = await self._queries.get_citation(
             security.security_scope_id,

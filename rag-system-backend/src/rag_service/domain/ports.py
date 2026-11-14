@@ -1183,6 +1183,14 @@ class QueryRepository(Protocol):
         """读取单条引用；作用域不匹配时与不存在一样返回 ``None``。"""
         ...
 
+    async def get_citation_request_id(
+        self,
+        security_scope_id: str,
+        citation_id: UUID,
+    ) -> UUID | None:
+        """按同一主体范围定位引用所属请求，用于复核社区历史证据的当前可用性。"""
+        ...
+
     async def add_feedback(
         self,
         security_scope_id: str,
