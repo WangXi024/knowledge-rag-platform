@@ -3626,7 +3626,7 @@ def stream_event_json(
 
 
 def _citation_json(value: Citation) -> dict[str, Any]:
-    """将引用转换成 SSE 可直接 JSON 编码的字典。"""
+    """将引用转换成 SSE 字典；与 REST 一致优先展示重排分。"""
     return {
         "citation_id": str(value.citation_id),
         "label": value.label,
@@ -3637,5 +3637,5 @@ def _citation_json(value: Citation) -> dict[str, Any]:
         "page_end": value.page_end,
         "positions": [{"page": item.page, "bbox": item.bbox} for item in value.positions],
         "quote": value.quote,
-        "score": value.score,
+        "score": value.rerank_score if value.rerank_score is not None else value.score,
     }

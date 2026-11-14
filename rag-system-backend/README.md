@@ -129,3 +129,7 @@ Domain/Application 核心分支覆盖率门禁为 80%，并在 CI 中使用 Post
   项目架构、逐目录/逐文件职责、API、数据表、运行流程和修改定位指南。
 - [`docs/NATIVE_GRAPHRAG.md`](docs/NATIVE_GRAPHRAG.md)：
   默认关闭开关、管理接口、检索与引用边界、取消限制和串行手动验收。
+- [`docs/GRAPH_COMMUNITIES.md`](docs/GRAPH_COMMUNITIES.md)：
+    第二期只读浏览、Gateway 社区策略、多来源证据、预算和 Schema V1.3.0。
+- [`docs/GRAPHRAG_PHASE2_VALIDATION.md`](docs/GRAPHRAG_PHASE2_VALIDATION.md)：
+    第二期自动检查、受控真实集成结果及已知限制。
