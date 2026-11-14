@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -78,6 +79,25 @@ class _Documents:
         """接收合成文档集合并初始化调用记录。"""
         self.items = documents
         self.calls: list[tuple[str, UUID, int, str | None]] = []
+
+    async def get_by_engine_ids(
+        self, security_scope_id: str, engine_document_ids: tuple[str, ...],
+    ) -> tuple[DocumentRecord, ...]:
+        """模拟真实主记录反查；保留非 READY 项，让适配器自己阻断失效来源。"""
+        return tuple(
+            item for item in self.items
+            if item.security_scope_id == security_scope_id
+            and item.ragflow_document_id in engine_document_ids
+        )
+
+    async def get_many(
+        self, security_scope_id: str, document_ids: tuple[UUID, ...],
+    ) -> tuple[DocumentRecord, ...]:
+        """源块回读后再次返回当前主记录，以测试切版本或状态变化。"""
+        return tuple(
+            item for item in self.items
+            if item.security_scope_id == security_scope_id and item.id in document_ids
+        )
 
     async def list(
         self,
@@ -1073,3 +1093,183 @@ async def test_first_preparation_empty_graph_check_uses_same_streaming_body_limi
             )
         assert stream.read_count == 65 and stream.closed
         assert not any(request.method in {"DELETE", "PUT", "POST"} for request in fixture.requests)
+
+
+async def test_read_graph_preserves_real_native_metadata_and_versioned_relation_locators() -> None:
+    """浏览返回真实类型/描述/文档来源；关系定位键是 Gateway 派生键，不伪造原文 ID。"""
+    data = _native_graph()
+    async with _fixture(lambda request: _ok(data)) as fixture:
+        first = await fixture.adapter.read_graph(_SCOPE, _KB_ID, 3)
+        again = await fixture.adapter.read_graph(_SCOPE, _KB_ID, 3)
+        newer = await fixture.adapter.read_graph(_SCOPE, _KB_ID, 4)
+        assert first.security_scope_id == _SCOPE and first.knowledge_base_id == _KB_ID
+        assert first.graph_generation == 3 and len(first.entities) == 5
+        assert first.entities[0].name == first.entities[0].id == "ATLAS"
+        assert first.entities[0].entity_type == "CATEGORY"
+        assert first.entities[0].description == data["graph"]["nodes"][0]["description"]
+        assert first.entities[0].source_document_ids == ("document-1",)
+        assert len(first.relations) == 3
+        assert first.relations[0].source == "ATLAS" and first.relations[0].target == "MIRA CHEN"
+        assert first.relations[0].description == data["graph"]["edges"][0]["description"]
+        assert [edge.id for edge in first.relations] == [edge.id for edge in again.relations]
+        assert first.relations[0].id != newer.relations[0].id
+
+
+async def test_graph_details_follow_captured_official_entity_and_relation_shape() -> None:
+    """真实官方 9 节点/15 边脱敏格式必须原样保留生成详情和合法文档来源。"""
+    captured = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "ragflow-v0.26.4-native-graph.json").read_text(
+            encoding="utf-8"
+        )
+    )["graph"]["body"]
+    async with _fixture(
+        lambda request: httpx.Response(200, json=captured),
+        documents=(_document(1), _document(2)),
+    ) as fixture:
+        graph = await fixture.adapter.read_graph(_SCOPE, _KB_ID, 1)
+        assert len(graph.entities) == 9 and len(graph.relations) == 15
+        original = captured["data"]["graph"]
+        by_id = {entity.id: entity for entity in graph.entities}
+        for node in original["nodes"]:
+            assert by_id[node["id"]].description == node.get("description", "")
+            assert by_id[node["id"]].entity_type == node.get("entity_type", "")
+            assert set(by_id[node["id"]].source_document_ids) <= {"document-1", "document-2"}
+        for relation, edge in zip(graph.relations, original["edges"], strict=True):
+            assert relation.source == edge["source"] and relation.target == edge["target"]
+            assert relation.description == edge.get("description", "")
+            assert set(relation.source_document_ids) == set(edge["source_id"])
+        assert all(request.method == "GET" for request in fixture.requests)
+
+
+def _source_chunk(engine_id: str, *, chunk_id: str = "actual-chunk") -> dict[str, Any]:
+    """构造原始公开 Chunk 响应，包含 TXT 会被清除的占位布局位置。"""
+    return {
+        "id": chunk_id, "content": f"Original content for {engine_id}.",
+        "document_id": engine_id, "dataset_id": _DATASET, "available": True,
+        "positions": [[7, 1, 2, 3, 4]],
+    }
+
+
+async def test_read_source_chunks_binds_quote_and_clears_text_placeholder_positions() -> None:
+    """真实原文绑定当前活动版本、文档映射和摘要，TXT 占位页码不能成为引用事实。"""
+    documents = (_document(1), _document(2))
+    documents[0].active_version_id = UUID("20000000-0000-0000-0000-000000000001")
+    documents[0].document_revision = 4
+    documents[1].filename = "source.pdf"
+    documents[1].mime_type = "application/pdf"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """只回读已映射文档的官方原文接口，不从图描述构造 quote。"""
+        assert request.method == "GET" and request.url.path.endswith("/chunks")
+        assert dict(request.url.params) == {"page": "1", "page_size": "100"}
+        engine_id = request.url.path.split("/")[-2]
+        return _ok({"total": 1, "chunks": [_source_chunk(engine_id)]})
+
+    async with _fixture(handler, documents=documents) as fixture:
+        sources = await fixture.adapter.read_source_chunks(
+            _SCOPE, _KB_ID, ("document-1", "document-2"),
+        )
+        assert len(sources) == 2
+        first, second = sources
+        assert first.quote == "Original content for document-1."
+        assert first.document_id == documents[0].id and first.document_revision == 4
+        assert first.active_version_id == documents[0].active_version_id
+        assert first.engine_chunk_id == "actual-chunk" and first.engine_document_id == "document-1"
+        assert first.quote_sha256 == hashlib.sha256(first.quote.encode()).hexdigest()
+        assert first.resource_scope_id == _SCOPE and first.knowledge_base_id == _KB_ID
+        assert first.positions == ()
+        assert second.positions[0].page == 7
+
+
+@pytest.mark.parametrize("failure", ["foreign", "retired", "not_ready"])
+async def test_source_chunk_mapping_never_reads_foreign_retired_or_unready_documents(
+    failure: str,
+) -> None:
+    """引擎文档 ID 必须映射本库当前 READY 主记录；退役 ID 和越界对象不触发远端访问。"""
+    document = _document()
+    engine_id = "document-1"
+    if failure == "foreign":
+        document.knowledge_base_id = UUID("30000000-0000-0000-0000-000000000001")
+    elif failure == "retired":
+        engine_id = "retired-engine-version"
+    else:
+        document.status = DocumentStatus.DELETING
+    async with _fixture(lambda request: _ok({}), documents=(document,)) as fixture:
+        with pytest.raises(ResourceNotFoundError):
+            await fixture.adapter.read_source_chunks(_SCOPE, _KB_ID, (engine_id,))
+        assert fixture.requests == []
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("dataset_id", "foreign-dataset", "RAG-RF-004"),
+    ("document_id", "foreign-document", "RAG-RF-004"),
+    ("id", "", "RAG-RF-004"),
+    ("content", "", "RAG-RF-004"),
+    ("available", False, "RAG-GRAPH-004"),
+])
+async def test_source_chunk_response_identity_and_availability_are_verified(
+    field: str, value: Any, code: str,
+) -> None:
+    """下游响应不能跨库/文档借用块，也不能将禁用内容作为社区原文来源。"""
+    chunk = _source_chunk("document-1")
+    chunk[field] = value
+    async with _fixture(lambda request: _ok({"total": 1, "chunks": [chunk]})) as fixture:
+        with pytest.raises(RagError, match=code):
+            await fixture.adapter.read_source_chunks(_SCOPE, _KB_ID, ("document-1",))
+
+
+async def test_source_chunk_version_switch_during_http_read_invalidates_result() -> None:
+    """版本切换后不能把旧内容/页码装配成新版本证据，最后一次本地复读必须拒绝。"""
+    document = _document()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """模拟网络读取时另一事务已经发布新的活动版本。"""
+        document.document_revision += 1
+        document.active_version_id = UUID("40000000-0000-0000-0000-000000000001")
+        return _ok({"total": 1, "chunks": [_source_chunk("document-1")]})
+
+    async with _fixture(handler, documents=(document,)) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-004"):
+            await fixture.adapter.read_source_chunks(_SCOPE, _KB_ID, ("document-1",))
+
+
+@pytest.mark.parametrize("failure", ["too_many", "incomplete", "large_quote", "total_chars"])
+async def test_source_chunk_budget_and_incomplete_coverage_are_explicitly_rejected(
+    failure: str,
+) -> None:
+    """不能截断文档或原文后声称覆盖全部社区来源，超限和不完整均明确不可用。"""
+    chunks = [_source_chunk("document-1")]
+    total = 1
+    if failure == "too_many":
+        total = 101
+    elif failure == "incomplete":
+        total = 2
+    elif failure == "large_quote":
+        chunks[0]["content"] = "x" * 32_769
+    else:
+        chunks = [_source_chunk("document-1", chunk_id=f"chunk-{index}") for index in range(9)]
+        for chunk in chunks:
+            chunk["content"] = "x" * 32_768
+        total = len(chunks)
+    async with _fixture(lambda request: _ok({"total": total, "chunks": chunks})) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-012"):
+            await fixture.adapter.read_source_chunks(_SCOPE, _KB_ID, ("document-1",))
+
+
+async def test_source_document_budget_rejects_more_than_eight_without_http() -> None:
+    """完整社区超过八个来源文档时拒绝，不静默选择前八个冒充全部来源。"""
+    async with _fixture(lambda request: _ok({})) as fixture:
+        with pytest.raises(RagError, match="RAG-GRAPH-012"):
+            await fixture.adapter.read_source_chunks(
+                _SCOPE, _KB_ID, tuple(f"document-{index}" for index in range(9)),
+            )
+        assert fixture.requests == []
+
+
+async def test_source_chunk_body_is_bounded_before_decoding_huge_response() -> None:
+    """原文分页也必须沿用 4 MiB 流式门禁，不能仅靠 JSON 解码后的字符数量保护内存。"""
+    stream = _CountedGraphStream(128)
+    async with _fixture(lambda request: httpx.Response(200, stream=stream)) as fixture:
+        with pytest.raises(RagFlowError, match="RAG-RF-004"):
+            await fixture.adapter.read_source_chunks(_SCOPE, _KB_ID, ("document-1",))
+        assert stream.read_count == 65 and stream.closed

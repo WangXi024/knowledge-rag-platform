@@ -447,6 +447,16 @@ CREATE TABLE query_record (
     created_at                  TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at                TIMESTAMPTZ(3),
     expires_at                  TIMESTAMPTZ(3),
+    -- 社区生成文本独立于原文引用，默认original与空证据兼容历史请求。
+    evidence_mode VARCHAR(16) NOT NULL DEFAULT 'original',
+    aggregate_profile_ref VARCHAR(128),
+    aggregate_evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    CONSTRAINT chk_query_evidence_mode CHECK (evidence_mode IN ('original','community')),
+    CONSTRAINT chk_query_aggregate_evidence CHECK (
+        jsonb_typeof(aggregate_evidence_json) = 'array'
+        AND jsonb_array_length(aggregate_evidence_json) <= 4
+        AND octet_length(aggregate_evidence_json::text) <= 1048576
+    ),
     CONSTRAINT pk_query_record PRIMARY KEY (request_id),
     CONSTRAINT uk_query_record_scope_id UNIQUE (security_scope_id, request_id),
     CONSTRAINT chk_query_scope CHECK (security_scope_id ~ '^[0-9a-f]{64}$'),
@@ -545,3 +555,49 @@ CREATE INDEX idx_feedback_scope_request
     ON feedback_record (security_scope_id, request_id, created_at);
 CREATE INDEX idx_feedback_scope_type
     ON feedback_record (security_scope_id, feedback_type, created_at);
+
+-- 一期派生状态与二期报告同一CAS行，执行迁移见migrations正式版本链。
+CREATE TABLE graph_state (
+    community_reports_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+    security_scope_id character(64) NOT NULL,
+    knowledge_base_id uuid NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    profile_ref character varying(128) NOT NULL,
+    auto_build boolean DEFAULT true NOT NULL,
+    retrieval_enabled boolean DEFAULT true NOT NULL,
+    status character varying(24) DEFAULT 'DISABLED' NOT NULL,
+    target_content_revision bigint DEFAULT 0 NOT NULL,
+    built_for_revision bigint,
+    graph_generation bigint DEFAULT 0 NOT NULL,
+    configuration_version bigint DEFAULT 0 NOT NULL,
+    row_version bigint DEFAULT 0 NOT NULL,
+    engine_task_id character varying(128),
+    job_id uuid,
+    last_error_code character varying(64),
+    last_error_message text,
+    queued_at timestamp with time zone,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_graph_community_reports CHECK (
+        jsonb_typeof(community_reports_json) = 'array'
+        AND jsonb_array_length(community_reports_json) <= 4
+        AND octet_length(community_reports_json::text) <= 1048576
+    ),
+    CONSTRAINT graph_state_pkey PRIMARY KEY (security_scope_id, knowledge_base_id),
+    CONSTRAINT fk_graph_state_knowledge_base FOREIGN KEY (security_scope_id, knowledge_base_id)
+        REFERENCES knowledge_base (security_scope_id, id) ON DELETE CASCADE,
+    CONSTRAINT chk_graph_state_scope CHECK (security_scope_id ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT chk_graph_state_status CHECK (
+        status IN ('DISABLED','NOT_BUILT','QUEUED','BUILDING','READY','STALE','FAILED','CANCELLING')
+    ),
+    CONSTRAINT chk_graph_state_versions CHECK (
+        target_content_revision >= 0 AND graph_generation >= 0
+        AND configuration_version >= 0 AND row_version >= 0
+        AND (built_for_revision IS NULL OR built_for_revision >= 0)
+    ),
+    CONSTRAINT chk_graph_state_ready_version CHECK (
+        status <> 'READY' OR (built_for_revision IS NOT NULL AND graph_generation > 0)
+    )
+);

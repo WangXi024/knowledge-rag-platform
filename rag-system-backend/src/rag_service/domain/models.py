@@ -11,8 +11,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from rag_service.domain.aggregate import AggregateEvidence, EvidenceMode
 
 
 def utc_now() -> datetime:
@@ -477,9 +480,9 @@ class Citation:
 class QueryRecord:
     """一次在线检索/问答的审计记录。
 
-    只保存经过脱敏的查询和必要诊断信息，不保存原始 Prompt/上下文；候选数量、
+    保存经过脱敏的查询和必要诊断信息，不保存完整 Prompt；候选数量、
     耗时、Token 用量、缓存状态与错误码用于可观测性。``request_id`` 同时也是 API
-    请求的稳定查询键。
+    请求的稳定查询键。显式社区模式额外保存已发布摘要与真实来源快照，供安全回查。
     """
     security_scope_id: str
     request_id: UUID
@@ -505,6 +508,9 @@ class QueryRecord:
     created_at: datetime = field(default_factory=utc_now)
     completed_at: datetime | None = None
     expires_at: datetime | None = None
+    evidence_mode: EvidenceMode = "original"
+    aggregate_profile_ref: str | None = None
+    aggregate_evidence: tuple[AggregateEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

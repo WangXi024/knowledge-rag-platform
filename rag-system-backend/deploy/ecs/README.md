@@ -55,7 +55,8 @@ tests/ecs/
 数据库账号/权限阶段与应用发布阶段独立，普通 release 不运行迁移或注释 SQL。
 
 `rag_app.alembic_version` 保留原名称。V1.0/V1.1 记录历史头
-`0006_document_version_updates`，V1.2 增量升级后记录 `0007_native_graphrag`。
+`0006_document_version_updates`，V1.2 增量升级后记录 `0007_native_graphrag`，再经V1.3推进到
+`0008_graph_aggregate_evidence`。
 它现在是 SQL 发布版本表，运行期已不依赖 Alembic，不能手改版本伪造升级。
 原 Python 迁移历史保存在改造前 Git 检查点 `335d418ae86671a7617d21017d10feb8d323c22b`。
 
@@ -113,6 +114,7 @@ ECS 不创建 Store、专用 Bucket 或共享服务权限，也不安装软件�
 | 3 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__init_schema.sql`：仅全新空库，创建 13 张表及 V1.0.0 版本 |
 | 4 | rag_app / lazytt_rag | `migrations/rag_app/V1.0.0__to__V1.1.0__shared_knowledge_bases.sql`：升级共享知识库结构，登记 V1.1.0 |
 | 5 | rag_app / lazytt_rag | `migrations/rag_app/V1.1.0__to__V1.2.0__native_graphrag.sql`：保留现有业务数据，新增图谱状态、GRAPH 类型与单在途任务约束，登记 V1.2.0 |
+| 5a | rag_app / lazytt_rag | `migrations/rag_app/V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql`：保留业务行，追加社区报告及独立聚合证据字段，登记 V1.3.0 |
 | 6 | rag_flow / lazytt_rag | `migrations/rag_flow/V0.26.4__init_schema.sql`：仅全新空库，创建 42 张表及相关结构 |
 | 7 | 对应业务库 / lazytt_rag | `03_rag_app_comments.sql`、`03_rag_flow_comments.sql`：补充中文注释；图谱字段注释由 V1.2 增量 SQL 携带 |
 | 8 | 对应业务库 / lazytt_rag | `04_verify_rag_app.sql`、`04_verify_rag_flow.sql`：只读验收，返回 verified |
@@ -125,8 +127,9 @@ SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS。跨其他库的 PUBLIC CON
 
 已有库按实际版本分支执行：
 
-- 已是 V1.2.0：跳过初始化和增量迁移，复核结构、注释及权限。
-- 已是 V1.1.0：只执行 V1.1→V1.2 增量 SQL，允许保留现有知识库/文档数据；既有知识库图谱保持关闭。
+- 已是 V1.3.0：跳过初始化和增量迁移，复核结构、注释及权限。
+- 已是 V1.2.0：只执行 V1.2→V1.3 增量SQL，旧请求默认original/空聚合，不重写普通引用。
+- 已是 V1.1.0：依次执行 V1.1→V1.2→V1.3 增量 SQL，允许保留现有知识库/文档数据；既有知识库图谱保持关闭。
 - 0006 完整旧结构、缺少全部发布元数据：只执行 `V1.0.0__stamp_existing_schema.sql`，
   之后按 V1.0.0 处理。不能给部分元数据、未知结构或 V1.1.0 重新盖章。
 - V1.0.0：升级脚本要求知识资源、Job、查询、反馈和幂等表为空。有旧业务数据时会拒绝，
@@ -188,6 +191,7 @@ GHCR 私有包需本次受限会话的有效登录。可临时设置 `DOCKER_CON
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__init_schema.sql
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.0.0__to__V1.1.0__shared_knowledge_bases.sql
 "${candidate[@]}" --mode migrate --database rag_app --sql V1.1.0__to__V1.2.0__native_graphrag.sql
+"${candidate[@]}" --mode migrate --database rag_app --sql V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql
 "${candidate[@]}" --mode migrate --database rag_flow --sql V0.26.4__init_schema.sql
 ```
 

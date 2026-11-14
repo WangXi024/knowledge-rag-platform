@@ -9,11 +9,21 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import timedelta
 
 from rag_service.application.graph import GraphService, noop_graph_checkpoint
+from rag_service.domain.aggregate import AggregateEvidence
 from rag_service.domain.errors import JobCancellationRequested, JobLeaseLostError, RagError
-from rag_service.domain.graph import GraphPort, GraphRepository, GraphState, GraphStatus, GraphTask
+from rag_service.domain.graph import (
+    GraphPort,
+    GraphProfile,
+    GraphRepository,
+    GraphState,
+    GraphStatus,
+    GraphTask,
+)
+from rag_service.domain.graph_read import GraphReportBuilder
 from rag_service.domain.models import (
     IngestionJob,
     JobStatus,
@@ -35,6 +45,7 @@ class GraphWorker:
         engine: GraphPort,
         service: GraphService,
         *,
+        report_builder: GraphReportBuilder | None = None,
         checkpoint: Callable[[], Awaitable[None]] = noop_graph_checkpoint,
         rollback: Callable[[], Awaitable[None]] = noop_graph_checkpoint,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -42,12 +53,13 @@ class GraphWorker:
         poll_seconds: float = 3.0,
         timeout_seconds: float = 1800.0,
     ) -> None:
-        """注入事务回调和有界轮询参数；测试可以使用确定性时钟而无需等待。"""
+        """注入租约事务、有界轮询及可选报告阶段；旧 light 策略不调用报告模型。"""
         self._knowledge_bases = knowledge_bases
         self._graphs = graphs
         self._jobs = jobs
         self._engine = engine
         self._service = service
+        self._report_builder = report_builder
         self._checkpoint = checkpoint
         self._rollback = rollback
         self._sleep = sleep
@@ -224,12 +236,66 @@ class GraphWorker:
                 return
             kb, state = context
             publishable = not self._obsolete(job, kb, state)
+            reports: tuple[AggregateEvidence, ...] = ()
             if publishable:
                 observed_row_version = state.row_version
                 try:
                     await self._engine.snapshot(
                         job.security_scope_id, state.knowledge_base_id, generation
                     )
+                    # 原生验收期间也可能完成内容提交；在报告模型收费之前复读一次。
+                    # 行版本变化须沿原有有限循环重验，已落后的图则直接进入过时收敛。
+                    before_reports = await self._publication_context(job)
+                    if before_reports is None:
+                        return
+                    candidate_kb, candidate_state = before_reports
+                    if candidate_state.row_version != observed_row_version:
+                        await self._retry_publication(publication_attempt)
+                        continue
+                    if (
+                        not self._obsolete(job, candidate_kb, state)
+                        and state.configuration.profile_ref == GraphProfile.NATIVE_WITH_SUMMARIES_V1
+                    ):
+                        if self._report_builder is None:
+                            raise RagError(
+                                "RAG-GRAPH-013", "当前策略要求 Gateway 社区报告构建器", 503, False
+                            )
+                        built = await self._report_builder.build(job, replace(state), generation)
+                        if not isinstance(built, tuple) or any(
+                            not isinstance(report, AggregateEvidence)
+                            or report.resource_scope_id != job.security_scope_id
+                            or report.knowledge_base_id != state.knowledge_base_id
+                            or report.graph_generation != generation
+                            or report.content_revision != job.payload.get("content_revision")
+                            or report.graph_profile_ref != state.configuration.profile_ref
+                            or report.origin != "gateway_generated"
+                            or any(
+                                source.resource_scope_id != job.security_scope_id
+                                or source.knowledge_base_id != state.knowledge_base_id
+                                for source in report.sources
+                            )
+                            for report in built
+                        ):
+                            raise RagError("RAG-GRAPH-013", "社区报告范围或版本不一致", 409, False)
+                        # 配置中的检索/自动调度开关变化不重收模型费用；相同图、内容和
+                        # 构图策略的恢复结果绑定本次发布配置版本，模型输入复用由 builder 核验。
+                        reports = tuple(
+                            replace(report, configuration_version=state.configuration_version)
+                            for report in built
+                        )
+                        after_reports = await self._publication_context(job)
+                        if after_reports is None:
+                            return
+                        report_kb, report_state = after_reports
+                        if report_state.row_version != observed_row_version:
+                            await self._retry_publication(publication_attempt)
+                            continue
+                        # 报告阶段含模型 I/O 和多个检查点；发布前再核完整物理/图来源。
+                        # 最终 CAS 仍使用进入第一次 snapshot 之前的原始行版本。
+                        if not self._obsolete(job, report_kb, state):
+                            await self._engine.snapshot(
+                                job.security_scope_id, state.knowledge_base_id, generation
+                            )
                 except RagError as error:
                     if error.code != "RAG-GRAPH-004":
                         raise
@@ -255,6 +321,7 @@ class GraphWorker:
                 kb = latest_kb
                 publishable = not self._obsolete(job, kb, state)
             state.status = GraphStatus.READY if publishable else GraphStatus.STALE
+            state.community_reports = reports if publishable else ()
             if publishable:
                 state.graph_generation = generation
                 state.built_for_revision = kb.revision

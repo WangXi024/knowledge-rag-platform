@@ -17,6 +17,7 @@ from sqlalchemy import and_, case, delete, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import array, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_service.domain.aggregate import EvidenceMode, evidences_from_payload, to_payload
 from rag_service.domain.errors import JobCancellationRequested, JobLeaseLostError
 from rag_service.domain.models import (
     AnswerOutcome,
@@ -1681,6 +1682,9 @@ def _query_to_domain(row: QueryRecordRow) -> QueryRecord:
         effective_query_redacted=row.effective_query_redacted,
         knowledge_base_ids=tuple(UUID(item) for item in row.knowledge_base_ids_json),
         retrieval_profile_ref=row.retrieval_profile_ref,
+        evidence_mode=_evidence_mode(row.evidence_mode),
+        aggregate_profile_ref=row.aggregate_profile_ref,
+        aggregate_evidence=evidences_from_payload(row.aggregate_evidence_json),
         prompt_profile_ref=row.prompt_profile_ref,
         model_profile_ref=row.model_profile_ref,
         cache_status=row.cache_status,
@@ -1697,6 +1701,15 @@ def _query_to_domain(row: QueryRecordRow) -> QueryRecord:
         completed_at=row.completed_at,
         expires_at=row.expires_at,
     )
+
+
+def _evidence_mode(value: str) -> EvidenceMode:
+    """数据库受 CHECK 约束，读取时仍拒绝未知模式以免混用原文与派生证据。"""
+    if value == "original":
+        return "original"
+    if value == "community":
+        return "community"
+    raise ValueError("invalid evidence mode")
 
 
 def _citation_to_domain(row: CitationRecordRow) -> Citation:
@@ -1763,6 +1776,9 @@ class SqlAlchemyQueryRepository:
                     str(identifier) for identifier in value.knowledge_base_ids
                 ],
                 retrieval_profile_ref=value.retrieval_profile_ref,
+                evidence_mode=value.evidence_mode,
+                aggregate_profile_ref=value.aggregate_profile_ref,
+                aggregate_evidence_json=[to_payload(item) for item in value.aggregate_evidence],
                 prompt_profile_ref=value.prompt_profile_ref,
                 model_profile_ref=value.model_profile_ref,
                 cache_status=value.cache_status,
@@ -1809,6 +1825,9 @@ class SqlAlchemyQueryRepository:
                 request_status=value.request_status.value,
                 outcome=value.outcome.value if value.outcome is not None else None,
                 effective_query_redacted=value.effective_query_redacted,
+                evidence_mode=value.evidence_mode,
+                aggregate_profile_ref=value.aggregate_profile_ref,
+                aggregate_evidence_json=[to_payload(item) for item in value.aggregate_evidence],
                 cache_status=value.cache_status,
                 candidate_count=value.candidate_count,
                 context_count=value.context_count,

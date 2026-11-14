@@ -148,6 +148,7 @@ DO $$ BEGIN
 ('idempotency_record', 'security_scope_id', 'character(64)', true),
 ('graph_state', 'security_scope_id', 'character(64)', true),
 ('graph_state', 'knowledge_base_id', 'uuid', true),
+('graph_state', 'community_reports_json', 'jsonb', true),
 ('graph_state', 'enabled', 'boolean', true),
 ('graph_state', 'profile_ref', 'character varying(128)', true),
 ('graph_state', 'auto_build', 'boolean', true),
@@ -220,6 +221,9 @@ DO $$ BEGIN
 ('query_record', 'security_scope_id', 'character(64)', true),
 ('query_record', 'request_status', 'character varying(32)', true),
 ('query_record', 'outcome', 'character varying(32)', false),
+('query_record', 'evidence_mode', 'character varying(16)', true),
+('query_record', 'aggregate_profile_ref', 'character varying(128)', false),
+('query_record', 'aggregate_evidence_json', 'jsonb', true),
 ('query_record', 'query_sha256', 'character(64)', true),
 ('query_record', 'query_redacted', 'text', false),
 ('query_record', 'effective_query_redacted', 'text', false),
@@ -256,9 +260,9 @@ DO $$ BEGIN
       RAISE EXCEPTION '对象所有者不符'; END IF;
 END $$;
 DO $$ BEGIN
-    -- V1.2 必须先执行独立增量 SQL，不能仅通过重写版本行绕过新表/约束验收。
-    IF (SELECT count(*) FROM rag_app.alembic_version WHERE version_num='0007_native_graphrag'
-      AND release_version='V1.2.0' AND schema_checksum='b8b9d47888f009e8b1800eab08092eef3227cbff69b50a81f7a51746e3833c49') <> 1
+    -- V1.3 必须先执行两期独立增量 SQL，不能仅通过重写版本行绕过新表/约束验收。
+    IF (SELECT count(*) FROM rag_app.alembic_version WHERE version_num='0008_graph_aggregate_evidence'
+      AND release_version='V1.3.0' AND schema_checksum='08964c430c371b296844af2cd6445c7ff54407904a16b151b65e119f8aae2c74') <> 1
       OR (SELECT count(*) FROM rag_app.alembic_version) <> 1 THEN RAISE EXCEPTION '发布基线错误'; END IF;
 END $$;
 -- 固定迁移中的结构对象必须存在；允许官方 RAGFlow 产生已审阅的额外对象。

@@ -24,7 +24,8 @@ PostgreSQL、Redis Stack 语义缓存，以及固定版本 RAGFlow 的完整本�
   `POST /rerank` 协议，故障时自动保留 RRF 排名。
 - 原生图谱：新增默认关闭的 RAGFlow v0.26.4 GraphRAG 一期接入，包含独立 Chat
   登记、知识库配置、异步构建/取消、管理界面及原文补召回。四组模型最小 API
-  请求已通过，原生构建到检索引用的完整流程仍待真实验收；严格物理版本边界和
+  请求及一期构建到检索引用流程已通过受控验收；二期增加只读浏览及Gateway社区摘要/多来源证据，
+  真实验收范围见对应记录。严格物理版本边界和
   过滤旁路见 [原生 GraphRAG 接入与验收](docs/NATIVE_GRAPHRAG.md)。
 - 切块与索引优化：新文件按正文、表格、视觉和媒体文件族自动选择不可变 Chunk
   Profile；`hybrid-structure-aware@6` 按问题类型动态选择 Top-K，并在 0.40 侧车

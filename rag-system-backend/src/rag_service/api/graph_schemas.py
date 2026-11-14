@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -16,7 +17,9 @@ class GraphConfigurationData(ApiModel):
     """知识库级受控图谱配置，默认关闭；查询开关与构图开关独立。"""
 
     enabled: bool = False
-    profile_ref: Literal["native-graph-light@1"] = "native-graph-light@1"
+    profile_ref: Literal["native-graph-light@1", "native-graph-with-summaries@1"] = (
+        "native-graph-light@1"
+    )
     auto_build: bool = True
     retrieval_enabled: bool = True
 
@@ -44,12 +47,7 @@ class GraphStateData(ApiModel):
         config = state.configuration
         return cls(
             knowledge_base_id=state.knowledge_base_id,
-            configuration=GraphConfigurationData(
-                enabled=config.enabled,
-                profile_ref="native-graph-light@1",
-                auto_build=config.auto_build,
-                retrieval_enabled=config.retrieval_enabled,
-            ),
+            configuration=GraphConfigurationData.model_validate(asdict(config)),
             status=state.status,
             target_content_revision=state.target_content_revision,
             built_for_revision=state.built_for_revision,

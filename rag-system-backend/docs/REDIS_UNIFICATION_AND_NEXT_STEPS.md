@@ -91,7 +91,7 @@ Stack，三个逻辑 DB 的分工不变。
 另外独立保留 `graph_version_hash` 和 `graph_mode`，供图谱发布版本与检索模式隔离。
 这两个字段的存在本身不代表原生图谱已启用；普通检索使用 `none` / `off`。
 
-默认语义索引升级为 `rag_semantic_cache_v3`，Hash 前缀为 `rag-cache:semantic:v3:`，
+默认语义索引升级为 `rag_semantic_cache_v4`，Hash 前缀为 `rag-cache:semantic:v4:`，
 Schema 版本为 3。Bootstrap 只创建这个新索引，并核验包含过滤/图谱维度在内的全部
 隔离 TAG；不会原地修改或删除 v1/v2 索引。自定义索引也必须使用新的版本名称、前缀
 及完整字段。旧缓存缺少新边界字段时按未命中处理，旧键依原有 TTL 自然过期。

@@ -5,9 +5,20 @@
 本文只描述 `rag_app`。它把开发期的六次 Alembic 演进冻结为正式发布基线
 `V1.0.0`，后续数据库变更改为 DBA 审核并人工执行增量 SQL。
 
+## V1.3.0 社区报告与独立聚合证据
+
+当前应用要求 `V1.3.0 / 0008_graph_aggregate_evidence`，仍为14张表。V1.2执行
+`migrations/rag_app/V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql` 向前升级：
+`graph_state.community_reports_json` 与图代数同事务CAS发布；`query_record` 新增
+`evidence_mode`、`aggregate_profile_ref`、`aggregate_evidence_json`。旧查询保持
+original/空聚合，普通citation_record不改；已有知识库、文档和审计行不清空。
+两个JSON集合都受四份报告及1MiB上限约束；版本、摘要不符或重复迁移会拒绝。
+新装沿V1.0→V1.1→V1.2→V1.3顺序，旧SQL冻结；external仍由DBA执行并只读验收。
+回退前关闭社区模式，保留新增字段和数据，不执行破坏性降级；恢复使用完整备份。
+
 ## V1.2.0 原生图谱状态
 
-当前应用要求 `V1.2.0 / 0007_native_graphrag`，共 14 张表（含版本表）。新增
+一期应用要求 `V1.2.0 / 0007_native_graphrag`，共 14 张表（含版本表）。新增
 `graph_state` 以 `(security_scope_id, knowledge_base_id)` 为复合主键并指向同 Scope
 知识库；配置版本、内容版本、图谱代数与乐观行版本分别保存。`GRAPH` 配置和
 `GRAPH_BUILD` 任务通过数据库约束验收，同一资源知识库只能有一项在途构图。

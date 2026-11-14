@@ -186,6 +186,8 @@ async def test_semantic_query_has_all_mandatory_filters_and_rejects_other_scope(
         "filter_hash",
         "graph_version_hash",
         "graph_mode",
+        "evidence_mode",
+        "aggregate_profile_ref",
         "normalized_question",
         "answer_json",
         "citations_json",
@@ -209,6 +211,8 @@ async def test_semantic_query_has_all_mandatory_filters_and_rejects_other_scope(
         "filter_hash",
         "graph_version_hash",
         "graph_mode",
+        "evidence_mode",
+        "aggregate_profile_ref",
         "expires_at_ms",
     ):
         assert f"@{field}:" in query
@@ -230,7 +234,11 @@ def _semantic_search_result(stored: dict[str, Any]) -> list[Any]:
 
 @pytest.mark.parametrize(
     ("field", "changed"),
-    [("filter_hash", "d" * 64), ("graph_version_hash", "e" * 64), ("graph_mode", "native")],
+    [
+        ("filter_hash", "d" * 64), ("graph_version_hash", "e" * 64), ("graph_mode", "native"),
+        ("evidence_mode", "community"),
+        ("aggregate_profile_ref", "rag-answer-community-localized@1"),
+    ],
 )
 @pytest.mark.asyncio
 async def test_filter_and_graph_boundaries_isolate_exact_and_semantic_answers(
@@ -277,14 +285,21 @@ async def test_extended_cache_boundary_roundtrips_in_both_storage_formats(
 
     assert exact is not None and exact.boundary == boundary
     assert len(semantic) == 1 and semantic[0].boundary == boundary
-    for field in ("filter_hash", "graph_version_hash", "graph_mode"):
+    for field in (
+        "filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref"
+    ):
         assert stored[field] == getattr(boundary, field)
     command = redis.commands[-1]
-    for field in ("filter_hash", "graph_version_hash", "graph_mode"):
+    for field in (
+        "filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref"
+    ):
         assert field in command[command.index("RETURN") + 2 : command.index("DIALECT")]
 
 
-@pytest.mark.parametrize("missing_field", ["filter_hash", "graph_version_hash", "graph_mode"])
+@pytest.mark.parametrize(
+    "missing_field",
+    ["filter_hash", "graph_version_hash", "graph_mode", "evidence_mode", "aggregate_profile_ref"],
+)
 @pytest.mark.asyncio
 async def test_legacy_cache_without_complete_extended_boundary_is_a_safe_miss(
     service_settings: ServiceSettings,

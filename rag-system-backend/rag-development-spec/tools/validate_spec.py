@@ -204,10 +204,10 @@ def validate_application_config() -> None:
     assert semantic["require_same_security_scope"] is True
     assert semantic["revalidate_citations"] is True
     assert semantic["vector_data_type"] == "FLOAT32"
-    # v3增加过滤和图谱边界；检查名字和前缀，不能仅改数字却混写历史索引。
-    assert semantic["index_schema_version"] == 3
-    assert semantic["index_name"] == "rag_semantic_cache_v3"
-    assert semantic["key_prefix"] == "rag-cache:semantic:v3:"
+    # v4增加聚合证据模式边界；检查名字和前缀，不能与历史索引混写。
+    assert semantic["index_schema_version"] == 4
+    assert semantic["index_name"] == "rag_semantic_cache_v4"
+    assert semantic["key_prefix"] == "rag-cache:semantic:v4:"
     uploads = config["uploads"]
     assert uploads["staging_backend"] == "local_volume"
     assert uploads["staging_dir"] == "/var/lib/rag/uploads"

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 from uuid import UUID
 
+from rag_service.domain.aggregate import AggregateEvidence, EvidenceMode
 from rag_service.domain.models import (
     Citation,
     DocumentEntity,
@@ -710,7 +711,8 @@ class CacheBoundary:
 
     除租户外还包含知识库修订、检索/Prompt/模型版本、语言、历史和过滤范围摘要。
     图谱版本与模式拥有独立维度，后续启用或重建图谱时不会误用普通检索的旧答案。
-    三个新增字段的默认值仅兼容已有内存构造方；持久缓存读取必须显式携带这些字段，
+    证据模式和聚合方案也独立参与边界，原文与派生答案不能互相重放。新增字段的默认值
+    仅兼容已有内存构造方；持久缓存读取必须显式携带这些字段，
     不能用默认值猜测历史答案当时是否执行了过滤或图谱检索。
     """
 
@@ -724,6 +726,8 @@ class CacheBoundary:
     filter_hash: str = "none"
     graph_version_hash: str = "none"
     graph_mode: str = "off"
+    evidence_mode: EvidenceMode = "original"
+    aggregate_profile_ref: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,6 +756,7 @@ class CacheEntry:
     warnings: tuple[str, ...] = ()
     usage: LlmUsage | None = None
     similarity: float | None = None
+    aggregate_evidence: tuple[AggregateEvidence, ...] = ()
 
 
 class AnswerCachePort(Protocol):

@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from io import StringIO
 from typing import Any
@@ -21,6 +22,7 @@ from uuid import UUID
 
 import httpx
 
+from rag_service.domain.aggregate import AggregateSource
 from rag_service.domain.errors import RagError, RagFlowError, ResourceNotFoundError
 from rag_service.domain.graph import (
     GraphConfiguration,
@@ -32,8 +34,10 @@ from rag_service.domain.graph import (
     GraphTask,
     native_graph_parser_config,
 )
-from rag_service.domain.models import DocumentStatus, KnowledgeBase
+from rag_service.domain.graph_read import NativeGraphData, NativeGraphEntity, NativeGraphRelation
+from rag_service.domain.models import DocumentRecord, DocumentStatus, KnowledgeBase
 from rag_service.domain.ports import DocumentRepository, KnowledgeBaseRepository
+from rag_service.infrastructure.ragflow.adapter import _positions
 from rag_service.settings import RagFlowSection
 
 _GRAPH_TITLE = "Related content in Knowledge Graph"
@@ -44,6 +48,10 @@ _GRAPH_NODE_TRUNCATION_LIMIT = 256
 _GRAPH_EDGE_TRUNCATION_LIMIT = 128
 _MAX_STRUCTURAL_TERMS = 8
 _MAX_GRAPH_RESPONSE_BYTES = 4 * 1024 * 1024
+_MAX_SOURCE_DOCUMENTS = 8
+_MAX_SOURCE_CHUNKS_PER_DOCUMENT = 100
+_MAX_SOURCE_CHUNK_CHARS = 32_768
+_MAX_SOURCE_TOTAL_CHARS = 262_144
 _GRAPH_SECTIONS = re.compile(r"^---- (Entities|Relations|Community Report) ----\s*$", re.M)
 
 
@@ -168,6 +176,18 @@ class _NativeGraphNode:
     label: str
     normalized_name: str
     source_ids: frozenset[str]
+    entity_type: str = ""
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeGraphEdge:
+    """已核验的原生关系详情；生成描述与活动文档来源分开保存。"""
+
+    source: str
+    target: str
+    description: str
+    source_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +197,7 @@ class _NativeGraphStructure:
     nodes: dict[str, _NativeGraphNode]
     adjacent: dict[str, set[str]]
     relation_count: int
+    relations: tuple[_NativeGraphEdge, ...] = ()
 
 
 class RagFlowGraphAdapter:
@@ -224,7 +245,7 @@ class RagFlowGraphAdapter:
         Python 的取消异常保持传播，以便 Worker 安全停止轮询。
         """
         try:
-            if method == "GET" and path.endswith("/graph"):
+            if method == "GET" and path.endswith(("/graph", "/chunks")):
                 return _response_data(await self._read_graph_response(path, **kwargs))
             response = await self._client.request(
                 method,
@@ -249,7 +270,7 @@ class RagFlowGraphAdapter:
         return _response_data(payload)
 
     async def _read_graph_response(self, path: str, **kwargs: Any) -> Any:
-        """只读图谱采用流式读取，JSON 解析前最多接收 4 MiB，不全量 aread。
+        """只读图谱与原文块采用流式读取，JSON 解析前最多接收 4 MiB，不全量 aread。
 
         已声明的大 Content-Length 在迭代之前拒绝；未知长度或分块传输按解码后字节
         累计限额，越限立即关闭响应。只读图谱显式请求 identity 编码，正常小响应与
@@ -441,22 +462,164 @@ class RagFlowGraphAdapter:
                 or normalized_name in normalized_names
             ):
                 raise RagFlowError.invalid_response()
+            entity_type = node.get("entity_type", "")
+            description = node.get("description", "")
+            if (
+                not isinstance(entity_type, str) or len(entity_type) > 64
+                or not isinstance(description, str) or len(description) > 32_768
+            ):
+                raise RagFlowError.invalid_response()
             validated[identifier] = _NativeGraphNode(
-                label, normalized_name, source_ids(node.get("source_id"))
+                label, normalized_name, source_ids(node.get("source_id")), entity_type, description
             )
             normalized_names.add(normalized_name)
 
         adjacent: dict[str, set[str]] = {identifier: set() for identifier in validated}
+        relations: list[_NativeGraphEdge] = []
         for value in edges:
             edge = _object(value)
             source, target = _identifier(edge.get("source")), _identifier(edge.get("target"))
             if source not in validated or target not in validated:
                 raise RagFlowError.invalid_response()
-            source_ids(edge.get("source_id"))
+            description = edge.get("description", "")
+            if not isinstance(description, str) or len(description) > 32_768:
+                raise RagFlowError.invalid_response()
+            relations.append(_NativeGraphEdge(
+                source, target, description, source_ids(edge.get("source_id"))
+            ))
             # 连接仅用于找相邻实体，不把边描述或方向解释为事实声明。
             adjacent[source].add(target)
             adjacent[target].add(source)
-        return _NativeGraphStructure(validated, adjacent, len(edges))
+        return _NativeGraphStructure(validated, adjacent, len(edges), tuple(relations))
+
+    async def read_graph(
+        self, security_scope_id: str, knowledge_base_id: UUID, graph_generation: int
+    ) -> NativeGraphData:
+        """公开已核验原生详情；描述保持生成属性，不补造社区报告或精确原文 Chunk。"""
+        knowledge_base = await self._knowledge_base(
+            security_scope_id, knowledge_base_id, graph_generation
+        )
+        self._require_enabled()
+        graph = await self._read_validated_graph(knowledge_base)
+        entities = tuple(
+            NativeGraphEntity(
+                identifier, node.label, node.entity_type, node.description,
+                tuple(sorted(node.source_ids)),
+            )
+            for identifier, node in graph.nodes.items()
+        )
+        relations = tuple(
+            NativeGraphRelation(
+                hashlib.sha256(json.dumps(
+                    [security_scope_id, str(knowledge_base_id), graph_generation,
+                     *sorted((edge.source, edge.target))], separators=(",", ":"),
+                ).encode()).hexdigest(),
+                edge.source, edge.target, edge.description, tuple(sorted(edge.source_ids)),
+            )
+            for edge in graph.relations
+        )
+        return NativeGraphData(
+            security_scope_id, knowledge_base_id, graph_generation, entities, relations
+        )
+
+    @staticmethod
+    def _source_budget_error() -> RagError:
+        """回溯不完整时明确拒绝摘要，不能截掉尾部原文后声称已覆盖全部来源。"""
+        return RagError("RAG-GRAPH-012", "图谱原文来源超预算或无法完整回溯", 422, False)
+
+    @staticmethod
+    def _source_binding(document: DocumentRecord) -> tuple[object, ...]:
+        """冻结活动映射及布局类型，防止 HTTP 回读期间切换版本后套用旧位置。"""
+        return (
+            document.security_scope_id, document.knowledge_base_id, document.id,
+            document.ragflow_document_id, document.document_revision, document.active_version_id,
+            document.status, document.filename, document.mime_type,
+        )
+
+    async def read_source_chunks(
+        self, security_scope_id: str, knowledge_base_id: UUID,
+        engine_document_ids: tuple[str, ...],
+    ) -> tuple[AggregateSource, ...]:
+        """完整回读至多八个活动文档、每份至多一百块，输出绑定版本的真实原文。
+
+        来源过多、分页不完整或正文超预算一律拒绝，不生成伪造 quote。每个响应块
+        还要核对 dataset/document ID；结束后复读本地主记录，版本或映射变化即失效。
+        TXT/Markdown 的占位页码沿用公共适配器规则清空，只有真实布局位置可返回。
+        """
+        knowledge_base = await self._knowledge_base(security_scope_id, knowledge_base_id, 0)
+        self._require_enabled()
+        identifiers = tuple(dict.fromkeys(_identifier(value) for value in engine_document_ids))
+        if len(identifiers) > _MAX_SOURCE_DOCUMENTS:
+            raise self._source_budget_error()
+        if not identifiers:
+            return ()
+        mapped = await self._documents.get_by_engine_ids(security_scope_id, identifiers)
+        if len(mapped) != len(identifiers) or any(
+            document.security_scope_id != security_scope_id
+            or document.knowledge_base_id != knowledge_base_id
+            or document.status != DocumentStatus.READY
+            or document.ragflow_document_id not in identifiers
+            for document in mapped
+        ):
+            raise ResourceNotFoundError("RAG-DOC-001", "文档不存在")
+        documents = {document.ragflow_document_id: replace(document) for document in mapped}
+        if len(documents) != len(identifiers):
+            raise ResourceNotFoundError("RAG-DOC-001", "文档不存在")
+        result: list[AggregateSource] = []
+        total_chars = 0
+        for engine_id in identifiers:
+            document = documents[engine_id]
+            data = _object(await self._request(
+                "GET", f"{self._dataset_path(knowledge_base)}/documents/"
+                f"{quote(engine_id, safe='')}/chunks",
+                params={"page": 1, "page_size": _MAX_SOURCE_CHUNKS_PER_DOCUMENT},
+            ))
+            chunks = data.get("chunks")
+            if not isinstance(chunks, list):
+                raise RagFlowError.invalid_response()
+            count = _total(data.get("total"))
+            if count > _MAX_SOURCE_CHUNKS_PER_DOCUMENT or count != len(chunks) or not chunks:
+                raise self._source_budget_error()
+            seen: set[str] = set()
+            for value in chunks:
+                chunk = _object(value)
+                if (
+                    chunk.get("document_id", chunk.get("doc_id")) != engine_id
+                    or chunk.get("dataset_id", chunk.get("kb_id"))
+                    != knowledge_base.ragflow_dataset_id
+                ):
+                    raise RagFlowError.invalid_response()
+                if chunk.get("available") is False or chunk.get("available_int") == 0:
+                    raise self._boundary_error()
+                chunk_id = _identifier(chunk.get("id"))
+                content = chunk.get("content")
+                if chunk_id in seen or not isinstance(content, str) or not content.strip():
+                    raise RagFlowError.invalid_response()
+                seen.add(chunk_id)
+                total_chars += len(content)
+                if len(content) > _MAX_SOURCE_CHUNK_CHARS or total_chars > _MAX_SOURCE_TOTAL_CHARS:
+                    raise self._source_budget_error()
+                result.append(AggregateSource(
+                    knowledge_base_id=knowledge_base_id, document_id=document.id,
+                    document_name=document.filename, engine_chunk_id=chunk_id, quote=content,
+                    resource_scope_id=security_scope_id,
+                    document_revision=document.document_revision,
+                    active_version_id=document.active_version_id, engine_document_id=engine_id,
+                    quote_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                    positions=_positions(
+                        chunk.get("positions"), filename=document.filename,
+                        mime_type=document.mime_type,
+                    ),
+                ))
+        current = await self._documents.get_many(
+            security_scope_id, tuple(document.id for document in documents.values())
+        )
+        expected = {document.id: self._source_binding(document) for document in documents.values()}
+        if len(current) != len(expected) or any(
+            expected.get(document.id) != self._source_binding(document) for document in current
+        ):
+            raise self._boundary_error()
+        return tuple(result)
 
     async def configure(
         self,

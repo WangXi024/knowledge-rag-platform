@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, Header, Path, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Send
 
+from rag_service.api.aggregate_schemas import AggregateEvidenceData
 from rag_service.api.schemas import (
     AnswerData,
     AnswerMeta,
@@ -198,6 +199,10 @@ def _answer(value: AnswerOutput) -> AnswerData:
             context_top_n=value.context_top_n,
         ),
         citations=[_citation(item) for item in value.citations],
+        evidence_mode=value.evidence_mode,
+        aggregate_evidence=[
+            AggregateEvidenceData.from_domain(item) for item in value.aggregate_evidence
+        ],
         warnings=list(value.warnings),
         usage=(
             UsageData(
@@ -231,6 +236,7 @@ def _answer_input(body: AnswerRequest, request_id: UUID) -> AnswerInput:
         retrieval_profile=body.retrieval_profile,
         generation_profile=body.generation_profile,
         response_language=body.response_language,
+        evidence_mode=body.evidence_mode,
         request_id=request_id,
     )
 
@@ -244,6 +250,11 @@ def _record(value: Any) -> RequestRecordData:
         original_query=value.query_redacted,
         effective_query=value.effective_query_redacted,
         answer=value.answer_text,
+        evidence_mode=value.evidence_mode,
+        aggregate_profile_ref=value.aggregate_profile_ref,
+        aggregate_evidence=[
+            AggregateEvidenceData.from_domain(item) for item in value.aggregate_evidence
+        ],
         warnings=list(value.warnings),
         created_at=value.created_at,
         completed_at=value.completed_at,

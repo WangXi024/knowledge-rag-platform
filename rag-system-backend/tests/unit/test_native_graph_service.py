@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,13 +13,16 @@ import pytest
 
 from rag_service.application.graph import GraphService
 from rag_service.application.graph_worker import GraphWorker
+from rag_service.domain.aggregate import AggregateEvidence, AggregateSource
 from rag_service.domain.errors import RagError
 from rag_service.domain.graph import (
     GraphConfiguration,
+    GraphProfile,
     GraphSnapshot,
     GraphState,
     GraphStatus,
     GraphTask,
+    native_graph_parser_config,
 )
 from rag_service.domain.models import (
     IngestionJob,
@@ -175,17 +180,61 @@ def graph_env() -> tuple[SecurityContext, Resources, GraphMemory, GraphService, 
     return security, resources, graphs, service, Engine()
 
 
-async def enabled_job(env: Any, *, auto_build: bool = False) -> IngestionJob:
+async def enabled_job(
+    env: Any, *, auto_build: bool = False,
+    profile_ref: str = GraphProfile.NATIVE_LIGHT_V1.value,
+) -> IngestionJob:
     """启用配置并认领一个构图 Job，模拟 Runner 已完成的原子认领。"""
     security, resources, _graphs, service, _engine = env
     await service.configure(
-        security, resources.kb.id, GraphConfiguration(enabled=True, auto_build=auto_build)
+        security, resources.kb.id,
+        GraphConfiguration(enabled=True, auto_build=auto_build, profile_ref=profile_ref),
     )
     state = await service.build(security, resources.kb.id)
     job = resources.jobs[state.job_id]
     job.status = JobStatus.RUNNING
     job.attempt = 1
     return job
+
+
+class Reports:
+    """可恢复的报告替身；模型结果只生成一次，后续调用复用原始配置版本的结果。"""
+
+    def __init__(self) -> None:
+        """计数调用与实际生成，支持在收费阶段注入内容、查询配置和取消交错。"""
+        self.calls = 0
+        self.generated = 0
+        self.result: AggregateEvidence | None = None
+        self.on_build: Any = None
+        self.overrides: dict[str, Any] = {}
+
+    async def build(
+        self, job: IngestionJob, state: GraphState, generation: int,
+    ) -> tuple[AggregateEvidence, ...]:
+        """生成带两份真实形状原文来源的合成报告，不访问模型或外部服务。"""
+        self.calls += 1
+        if self.result is None:
+            self.generated += 1
+            sources = tuple(AggregateSource(
+                knowledge_base_id=state.knowledge_base_id, document_id=uuid4(),
+                document_name=f"source-{index}.txt", engine_chunk_id=f"chunk-{index}",
+                quote=f"ATLAS original source {index}.", resource_scope_id=job.security_scope_id,
+                document_revision=1, active_version_id=uuid4(),
+                engine_document_id=f"document-{index}",
+                quote_sha256=hashlib.sha256(f"ATLAS original source {index}.".encode()).hexdigest(),
+            ) for index in (1, 2))
+            self.result = AggregateEvidence(
+                aggregate_id=uuid4(), label="", knowledge_base_id=state.knowledge_base_id,
+                community_id="synthetic-community", title="合成社区", summary="合成多来源报告。",
+                graph_generation=generation, content_revision=job.payload["content_revision"],
+                configuration_version=state.configuration_version,
+                graph_profile_ref=state.configuration.profile_ref, report_sha256="a" * 64,
+                sources=sources, resource_scope_id=job.security_scope_id,
+                generator_model_ref="synthetic-report-chat",
+            )
+        if self.on_build:
+            await self.on_build()
+        return (replace(self.result, **self.overrides),)
 
 
 async def test_defaults_do_not_write_or_require_model(graph_env: Any) -> None:
@@ -1138,3 +1187,202 @@ async def test_receipt_during_valid_snapshot_requires_revalidation_with_original
     assert snapshots == 2 and rollbacks == 1
     assert state.status == GraphStatus.READY and state.graph_generation == 1
     assert job.status == JobStatus.SUCCEEDED and len(resources.jobs) == engine.build_count == 1
+
+
+def test_summary_profile_keeps_existing_native_light_parser_flags_unchanged() -> None:
+    """新版本只增加 Gateway 阶段，不能原地开启不可公开回溯的原生社区/消歧功能。"""
+    light = GraphConfiguration(enabled=True)
+    summaries = replace(light, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    assert light.profile_ref == "native-graph-light@1"
+    assert native_graph_parser_config(light) == native_graph_parser_config(summaries)
+    assert native_graph_parser_config(summaries)["community"] is False
+    assert native_graph_parser_config(summaries)["resolution"] is False
+
+
+async def test_summary_profile_publishes_reports_between_two_strict_snapshots(
+    graph_env: Any,
+) -> None:
+    """报告必须在两次来源验收之间完成，最终状态保存独立聚合证据及同版本边界。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    builder = Reports()
+    events: list[str] = []
+
+    async def snapshot() -> None:
+        """记录发布前原生来源验收的真实先后顺序。"""
+        events.append("snapshot")
+
+    async def report() -> None:
+        """报告模型阶段只能发生于第一次完整来源验收之后。"""
+        events.append("report")
+
+    engine.on_snapshot = snapshot
+    builder.on_build = report
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.READY and job.status == JobStatus.SUCCEEDED
+    assert events == ["snapshot", "report", "snapshot"]
+    assert len(state.community_reports) == builder.generated == builder.calls == 1
+    assert engine.build_count == 1
+    assert state.community_reports[0].graph_generation == state.graph_generation == 1
+    assert state.community_reports[0].configuration_version == state.configuration_version
+
+
+@pytest.mark.parametrize("summary_profile", [False, True])
+async def test_summary_builder_is_required_only_for_new_profile(
+    graph_env: Any, summary_profile: bool,
+) -> None:
+    """旧策略不调用报告模型；新策略缺少构建器必须明确失败，不能假称摘要已可用。"""
+    _security, resources, graphs, service, engine = graph_env
+    profile = (GraphProfile.NATIVE_WITH_SUMMARIES_V1 if summary_profile
+               else GraphProfile.NATIVE_LIGHT_V1)
+    job = await enabled_job(graph_env, profile_ref=profile.value)
+    builder = Reports()
+    await GraphWorker(
+        resources, graphs, resources, engine, service,
+        report_builder=None if summary_profile else builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert builder.calls == 0 and state.community_reports == ()
+    assert engine.build_count == 1
+    if summary_profile:
+        assert state.status == GraphStatus.FAILED and job.error_code == "RAG-GRAPH-013"
+    else:
+        assert state.status == GraphStatus.READY and job.status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("during_report", [False, True])
+async def test_obsolete_report_stage_never_publishes_and_schedules_one_successor(
+    graph_env: Any, during_report: bool,
+) -> None:
+    """原生验收或报告期间内容变更只安排一个后继；明知过时前不得额外调用报告模型。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(
+        graph_env, auto_build=True, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value,
+    )
+    builder = Reports()
+    changed = False
+
+    async def change_content_once() -> None:
+        """模拟独立摄取事务已发布新内容，推进图谱目标和 CAS 版本。"""
+        nonlocal changed
+        if not changed:
+            changed = True
+            resources.kb.revision += 1
+            await service.content_changed(resources.kb.security_scope_id, resources.kb.id)
+
+    if during_report:
+        builder.on_build = change_content_once
+    else:
+        engine.on_snapshot = change_content_once
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert job.status == JobStatus.SUCCEEDED and job.result["published"] is False
+    assert state.status == GraphStatus.QUEUED and state.graph_generation == 0
+    assert state.community_reports == () and len(resources.jobs) == 2
+    assert builder.generated == builder.calls == int(during_report)
+    assert engine.build_count == 1
+
+
+async def test_query_switch_during_report_reuses_paid_result_and_rebinds_configuration(
+    graph_env: Any,
+) -> None:
+    """查询开关推进 CAS 后重新验收，复用同图同内容报告，不能重复模型或原生构图收费。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    builder = Reports()
+    switched = False
+
+    async def switch_query_once() -> None:
+        """只变更检索开关，不改变不可变构图策略和内容指纹。"""
+        nonlocal switched
+        if not switched:
+            switched = True
+            await service.configure(security, resources.kb.id, GraphConfiguration(
+                enabled=True, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value,
+                auto_build=False, retrieval_enabled=False,
+            ))
+
+    builder.on_build = switch_query_once
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert state.status == GraphStatus.READY and job.status == JobStatus.SUCCEEDED
+    assert builder.calls == 2 and builder.generated == engine.build_count == 1
+    assert builder.result is not None
+    assert builder.result.configuration_version < state.configuration_version
+    assert state.community_reports[0].configuration_version == state.configuration_version
+    assert len(resources.jobs) == 1
+
+
+async def test_cancel_during_report_cannot_publish_ready_or_reports(graph_env: Any) -> None:
+    """取消期间即使模型已返回，也必须优先按已完成原生任务确认取消，不能发布摘要。"""
+    security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    builder = Reports()
+
+    async def cancel() -> None:
+        """模拟报告完成的同一时刻管理员登记取消。"""
+        await service.cancel(security, resources.kb.id)
+
+    builder.on_build = cancel
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert job.status == JobStatus.CANCELLED and state.status == GraphStatus.STALE
+    assert state.community_reports == () and state.graph_generation == 0
+    assert len(resources.jobs) == builder.generated == engine.build_count == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("resource_scope_id", "foreign-scope"),
+    ("knowledge_base_id", UUID("60000000-0000-0000-0000-000000000001")),
+    ("graph_generation", 100),
+    ("content_revision", 100),
+    ("graph_profile_ref", GraphProfile.NATIVE_LIGHT_V1.value),
+])
+async def test_invalid_report_scope_or_build_fingerprint_is_never_published(
+    graph_env: Any, field: str, value: Any,
+) -> None:
+    """报告范围、代数、内容和策略必须属于当前原生构建；不能重绑这些收费输入边界。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    builder = Reports()
+    builder.overrides[field] = value
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert job.status == JobStatus.FAILED and job.error_code == "RAG-GRAPH-013"
+    assert state.status == GraphStatus.FAILED and state.community_reports == ()
+    assert engine.build_count == 1
+
+
+async def test_second_source_snapshot_failure_refuses_generated_report(graph_env: Any) -> None:
+    """模型返回后引擎来源变化而本地内容未变，二次严格验收必须拒绝发布。"""
+    _security, resources, graphs, service, engine = graph_env
+    job = await enabled_job(graph_env, profile_ref=GraphProfile.NATIVE_WITH_SUMMARIES_V1.value)
+    builder = Reports()
+    snapshots = 0
+
+    async def source_changes_after_report() -> None:
+        """第一轮正常，模型之后发现原生图不再满足活动来源边界。"""
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 2:
+            raise RagError("RAG-GRAPH-004", "合成图来源发生无版本变化的异常", 409, False)
+
+    engine.on_snapshot = source_changes_after_report
+    await GraphWorker(
+        resources, graphs, resources, engine, service, report_builder=builder,
+    ).execute(job)
+    state = await graphs.get(resources.kb.security_scope_id, resources.kb.id)
+    assert snapshots == 2 and job.error_code == "RAG-GRAPH-004"
+    assert state.status == GraphStatus.FAILED and state.community_reports == ()
+    assert builder.generated == engine.build_count == 1

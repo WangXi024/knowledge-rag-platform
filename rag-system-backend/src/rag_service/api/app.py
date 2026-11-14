@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+from rag_service.api.graph_browser_routes import install_graph_browser_routes
 from rag_service.api.graph_routes import install_graph_routes
 from rag_service.api.offline_routes import install_offline_routes
 from rag_service.api.online_routes import install_online_routes
@@ -36,6 +37,7 @@ from rag_service.api.schemas import (
     VersionResponse,
 )
 from rag_service.application.graph import GraphService
+from rag_service.application.graph_browser import GraphBrowserService
 from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.offline import OfflineService
 from rag_service.application.online import OnlineService
@@ -160,6 +162,7 @@ def create_app(
     offline_service: OfflineService | None = None,
     online_service: OnlineService | None = None,
     graph_service: GraphService | None = None,
+    graph_browser: GraphBrowserService | None = None,
     runtime_readiness: bool = False,
 ) -> FastAPI:
     """创建配置完整的 FastAPI 应用，并按需组装真实或注入的依赖。
@@ -409,6 +412,23 @@ def create_app(
             )
         await notify_committed(session, settings)
 
+    async def get_graph_browser() -> AsyncIterator[GraphBrowserService]:
+        """只读浏览使用自己的短事务和Adapter，结束后关闭HTTP连接，不触发模型。"""
+        if graph_browser is not None:
+            yield graph_browser
+            return
+        if session_factory is None:
+            raise RagError("RAG-GRAPH-002", "图谱浏览服务尚未配置", 503, False)
+        async with session_factory() as session, session.begin():
+            kbs = SqlAlchemyKnowledgeBaseRepository(session)
+            documents = SqlAlchemyDocumentRepository(session)
+            native = RagFlowGraphAdapter(settings.ragflow, kbs, documents)
+            try:
+                yield GraphBrowserService(kbs, SqlAlchemyGraphRepository(session), native,
+                                          enabled=settings.ragflow.graph_enabled)
+            finally:
+                await native.close()
+
     async def get_online_service() -> AsyncIterator[OnlineService]:
         """为一次在线 API 请求组装检索/模型/缓存 Service，并可靠关闭全部客户端。
 
@@ -470,6 +490,10 @@ def create_app(
                 graphs=SqlAlchemyGraphRepository(session),
                 native_graph=native_graph,
                 graph_enabled=settings.ragflow.graph_enabled,
+                aggregate_port=GraphBrowserService(
+                    knowledge_bases, SqlAlchemyGraphRepository(session), native_graph,
+                    enabled=settings.ragflow.graph_enabled,
+                ),
             )
             try:
                 yield service
@@ -556,6 +580,8 @@ def create_app(
                     "entity_index": True,
                     "lightweight_knowledge_graph": True,
                     "native_graphrag": settings.ragflow.graph_enabled,
+                    "graph_browsing": settings.ragflow.graph_enabled,
+                    "community_aggregate_evidence": settings.ragflow.graph_enabled,
                     "tenant_shared_knowledge_bases": True,
                     "system_shared_knowledge_bases": True,
                     "automatic_shared_knowledge_retrieval": True,
@@ -581,6 +607,10 @@ def create_app(
         sse_heartbeat_seconds=settings.answers.sse_heartbeat_seconds,
     )
     install_graph_routes(app, authenticate=authenticate, get_graph_service=get_graph_service)
+
+    install_graph_browser_routes(
+        app, authenticate=authenticate, get_graph_browser=get_graph_browser,
+    )
 
     return app
 

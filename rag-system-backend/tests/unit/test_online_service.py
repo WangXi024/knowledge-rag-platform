@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,7 @@ from rag_service.application.online import (
     StreamEvent,
 )
 from rag_service.application.profiles import ProfileCatalog
+from rag_service.domain.aggregate import AggregateEvidence, AggregateSource
 from rag_service.domain.errors import LlmError, ResourceNotFoundError
 from rag_service.domain.graph import (
     GraphConfiguration,
@@ -68,6 +70,116 @@ from rag_service.domain.ports import (
 from rag_service.infrastructure.models.rerank import DisabledRerankAdapter
 from rag_service.security.context import SecurityContext, derive_system_resource_scope_id
 from rag_service.settings import AnswersSection, ServiceSettings
+
+
+class MemoryAggregatePort:
+    """提供可撤销的跨文档证据，用调用顺序模拟生成期间的来源修订。"""
+
+    def __init__(self, evidence: AggregateEvidence) -> None:
+        self.evidence = evidence
+        self.additional: tuple[AggregateEvidence, ...] = ()
+        self.valid = True
+        self.validations = 0
+        self.expire_on_validation: int | None = None
+
+    async def list_available(
+        self, security: SecurityContext, kb_ids: tuple[UUID, ...]
+    ) -> tuple[AggregateEvidence, ...]:
+        return tuple(
+            evidence for evidence in (self.evidence, *self.additional)
+            if evidence.knowledge_base_id in kb_ids
+            and evidence.resource_scope_id == security.tenant_resource_scope_id
+        )
+
+    async def revalidate(
+        self, security: SecurityContext, evidences: tuple[AggregateEvidence, ...]
+    ) -> bool:
+        self.validations += 1
+        return (
+            self.valid
+            and bool(evidences)
+            and all(
+                item.resource_scope_id == security.tenant_resource_scope_id for item in evidences
+            )
+            and (
+                self.expire_on_validation is None
+                or self.validations < self.expire_on_validation
+            )
+        )
+
+
+def _community_port(
+    service: OnlineService, knowledge_base: KnowledgeBase, document: DocumentRecord
+) -> MemoryAggregatePort:
+    """只创建合成报告，来源 quote 与摘要刻意不同以防混入普通 Citation。"""
+    quotes = ("Aurora Labs developed Atlas.", "Mira Chen leads Atlas at Aurora Labs.")
+    sources = tuple(
+        AggregateSource(
+            knowledge_base_id=knowledge_base.id,
+            document_id=document.id if index == 0 else uuid4(),
+            document_name=f"synthetic-{index}.txt",
+            engine_chunk_id=f"raw-{index}",
+            quote=quote,
+            resource_scope_id=knowledge_base.security_scope_id,
+            document_revision=1,
+            active_version_id=None,
+            engine_document_id=f"engine-{index}",
+            quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
+        )
+        for index, quote in enumerate(quotes)
+    )
+    evidence = AggregateEvidence(
+        aggregate_id=uuid4(),
+        label="",
+        knowledge_base_id=knowledge_base.id,
+        community_id="synthetic-community",
+        title="Atlas community",
+        summary="Aurora Labs and Mira Chen are connected through Atlas.",
+        graph_generation=2,
+        content_revision=knowledge_base.revision,
+        configuration_version=1,
+        graph_profile_ref="native-graph-with-summaries@1",
+        report_sha256=hashlib.sha256(
+            b"Aurora Labs and Mira Chen are connected through Atlas."
+        ).hexdigest(),
+        sources=sources,
+        resource_scope_id=knowledge_base.security_scope_id,
+        generator_model_ref="answer-openai-compatible@4",
+    )
+    port = MemoryAggregatePort(evidence)
+    service._aggregate_port = port
+    service._graph_enabled = True
+    return port
+
+
+def _two_communities(
+    service: OnlineService, engine: FakeRagEngine, kb: KnowledgeBase, document: DocumentRecord
+) -> tuple[MemoryAggregatePort, Citation]:
+    """普通 C1 仅由第二份 A2 报告支持，第一份 A1 使用不同真实文档身份。"""
+    port = _community_port(service, kb, document)
+    second = replace(
+        port.evidence, aggregate_id=uuid4(), community_id="second-community"
+    )
+    port.evidence = replace(
+        port.evidence,
+        sources=tuple(
+            replace(
+                source, document_id=uuid4(), engine_chunk_id=f"unrelated-{index}",
+                engine_document_id=f"other-engine-{index}",
+            )
+            for index, source in enumerate(port.evidence.sources)
+        ),
+    )
+    port.additional = (second,)
+    source = second.sources[0]
+    engine.vector = (
+        replace(engine.vector[0], content=source.quote, engine_chunk_id=source.engine_chunk_id),
+    )
+    engine.term = engine.vector
+    citation = replace(
+        service._citations(engine.vector)[0], document_name=source.document_name
+    )
+    return port, citation
 
 
 class MemoryKnowledgeBases:
@@ -3150,3 +3262,278 @@ async def test_native_graph_many_libraries_respect_total_model_call_budget(
     assert len(graph.snapshot_calls) == 2 and len(plan.targets) == 2
     assert "native_graph_budget_exhausted" in plan.warnings
     assert not plan.cacheable
+
+
+@pytest.mark.asyncio
+async def test_community_answer_keeps_derived_evidence_out_of_original_citations(
+    service_settings: ServiceSettings,
+) -> None:
+    """A 摘要独立持久化，C 引用仍然只能携带实际召回原文。"""
+    queries = MemoryQueries()
+    service, engine, llm, kb, document = _service(
+        service_settings, llm_responses=["Atlas connects Aurora Labs and Mira Chen. [A1] [C1]"],
+        queries=queries,
+    )
+    port = _community_port(service, kb, document)
+    source = port.evidence.sources[0]
+    engine.vector = (
+        replace(engine.vector[0], content=source.quote, engine_chunk_id=source.engine_chunk_id),
+    )
+    engine.term = engine.vector
+    value = AnswerInput((kb.id,), "What connects Atlas?", evidence_mode="community")
+    result = await service.answer(_security(), value)
+    assert result.outcome == AnswerOutcome.SUCCESS
+    assert result.evidence_mode == "community"
+    assert len(result.aggregate_evidence) == 1 and result.aggregate_evidence[0].label == "A1"
+    assert result.citations[0].quote == engine.vector[0].content
+    assert result.citations[0].quote != result.aggregate_evidence[0].summary
+    assert port.validations == 2
+    record = queries.records[value.request_id]
+    assert record.aggregate_evidence == result.aggregate_evidence
+    assert record.aggregate_profile_ref == "rag-answer-community-localized@1"
+    assert record.evidence_mode == "community" and record.request_status == QueryStatus.COMPLETED
+    model_profile = service._profiles.get("MODEL", value.generation_profile)
+    assert llm.requests[0].max_output_tokens == model_profile["max_output_tokens"]
+    assert llm.requests[0].temperature == model_profile["temperature"]
+    assert llm.requests[0].top_p == model_profile["top_p"]
+
+
+@pytest.mark.asyncio
+async def test_community_can_answer_from_verified_sources_without_ordinary_recall(
+    service_settings: ServiceSettings,
+) -> None:
+    """多来源摘要有独立证据语义，不要求伪造一个 C 引用才能回答。"""
+    service, _, _, kb, doc = _service(
+        service_settings, llm_responses=["Aurora Labs developed Atlas. [A1]"], candidates=False
+    )
+    _community_port(service, kb, doc)
+    result = await service.answer(
+        _security(), AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    )
+    assert result.outcome == AnswerOutcome.SUCCESS
+    assert not result.citations and len(result.aggregate_evidence) == 1
+
+
+@pytest.mark.asyncio
+async def test_original_answer_cannot_publish_unbacked_aggregate_labels(
+    service_settings: ServiceSettings,
+) -> None:
+    """默认原文路径不附带报告，也不能接受模型自己编造的 A 标签。"""
+    service, _, _, kb, _ = _service(
+        service_settings, llm_responses=["Unsupported [C1] [A1]", "Unsupported [C1] [A1]"]
+    )
+    result = await service.answer(_security(), AnswerInput((kb.id,), "What is Atlas?"))
+    assert result.outcome == AnswerOutcome.REFUSED and not result.aggregate_evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repaired", ["Atlas [A1] [C1]", "Atlas [A1] [A2] [C1]"])
+async def test_community_citations_require_the_actual_output_aggregate_source_closure(
+    service_settings: ServiceSettings, repaired: str
+) -> None:
+    """C1 属于 A2 时只引用 A1 不能发布；一次修复加入 A2 后才能完整保留证据。"""
+    service, engine, llm, kb, doc = _service(
+        service_settings, llm_responses=["Atlas [A1] [C1]", repaired]
+    )
+    _two_communities(service, engine, kb, doc)
+    result = await service.answer(
+        _security(), AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    )
+    assert len(llm.requests) == 2
+    assert llm.requests[0].max_output_tokens == llm.requests[1].max_output_tokens
+    assert llm.requests[0].temperature == llm.requests[1].temperature
+    assert llm.requests[0].top_p == llm.requests[1].top_p
+    if "[A2]" in repaired:
+        assert result.outcome == AnswerOutcome.SUCCESS
+        assert len(result.aggregate_evidence) == 2 and len(result.citations) == 1
+    else:
+        assert result.outcome == AnswerOutcome.REFUSED
+        assert not result.aggregate_evidence and not result.citations
+
+
+@pytest.mark.asyncio
+async def test_community_cache_and_history_reject_citation_outside_published_aggregate(
+    service_settings: ServiceSettings,
+) -> None:
+    """缓存/审计的 C 不得借用未保存的 A2 来源，尽管它的文档仍 READY。"""
+    cache, queries = FakeCache(), MemoryQueries()
+    service, engine, llm, kb, doc = _service(
+        service_settings, llm_responses=["Atlas [A1]", "Fresh Atlas [A1]"],
+        cache=cache, queries=queries,
+    )
+    _, citation = _two_communities(service, engine, kb, doc)
+    value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    first = await service.answer(_security(), value)
+    assert len(first.aggregate_evidence) == 1 and not first.citations
+    assert cache.entry is not None
+    cache.entry = replace(cache.entry, answer="Cached Atlas [A1] [C1]", citations=(citation,))
+    second = await service.answer(_security(), replace(value, request_id=uuid4()))
+    assert second.cache_type == "none" and len(llm.requests) == 2
+    record = queries.records[value.request_id]
+    record.answer_text = "Historical Atlas [A1] [C1]"
+    queries.citations[value.request_id] = (citation,)
+    public = await service.get_request(_security(), value.request_id)
+    assert public.answer_text is None and not public.aggregate_evidence
+    assert public.outcome == AnswerOutcome.REFUSED
+    assert record.answer_text == "Historical Atlas [A1] [C1]"
+
+
+@pytest.mark.asyncio
+async def test_community_generation_change_is_refused_and_never_cached_or_streamed(
+    service_settings: ServiceSettings,
+) -> None:
+    """生成期间撤销来源必须关闭输出，SSE 也不能先发送尚待复核的草稿。"""
+    for stream in (False, True):
+        cache = FakeCache()
+        service, _, _, kb, doc = _service(
+            service_settings, llm_responses=["DO NOT LEAK GENERATED DRAFT [A1]"], cache=cache
+        )
+        port = _community_port(service, kb, doc)
+        port.expire_on_validation = 2
+        value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+        if stream:
+            events = [event async for event in service.stream_answer(_security(), value)]
+            assert events[0].event == "accepted" and events[-1].event == "completed"
+            assert events[-1].data["outcome"] == "refused"
+            assert not any(event.event == "aggregate" for event in events)
+            assert not any("DO NOT LEAK" in str(event.data) for event in events)
+        else:
+            result = await service.answer(_security(), value)
+            assert result.outcome == AnswerOutcome.REFUSED
+            assert not result.citations and not result.aggregate_evidence
+            assert "DO NOT LEAK" not in result.answer
+            assert "aggregate_sources_changed" in result.warnings
+        assert cache.puts == []
+
+
+@pytest.mark.asyncio
+async def test_community_cache_separates_mode_generation_and_revalidates_sources(
+    service_settings: ServiceSettings,
+) -> None:
+    """同问题原文/社区模式与不同图代数独立，社区命中也再次检查真实来源。"""
+    cache = FakeCache()
+    service, _, llm, kb, doc = _service(
+        service_settings,
+        llm_responses=["Atlas [A1]", "Atlas original [C1]", "Atlas new [A1]"],
+        cache=cache,
+    )
+    port = _community_port(service, kb, doc)
+    value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    first = await service.answer(_security(), value)
+    second = await service.answer(_security(), replace(value, request_id=uuid4()))
+    assert first.cache_type == "none" and second.cache_type == "exact"
+    assert port.validations == 4 and len(llm.requests) == 1
+    assert first.aggregate_evidence[0].aggregate_id != second.aggregate_evidence[0].aggregate_id
+    original = await service.answer(
+        _security(), replace(value, request_id=uuid4(), evidence_mode="original")
+    )
+    assert original.cache_type == "none" and not original.aggregate_evidence
+    port.evidence = replace(port.evidence, graph_generation=3)
+    changed = await service.answer(_security(), replace(value, request_id=uuid4()))
+    assert changed.cache_type == "none" and changed.aggregate_evidence[0].graph_generation == 3
+    port.valid = False
+    revoked = await service.answer(_security(), replace(value, request_id=uuid4()))
+    assert revoked.outcome == AnswerOutcome.NO_EVIDENCE and len(llm.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_community_filtered_or_disabled_request_does_not_call_model(
+    service_settings: ServiceSettings,
+) -> None:
+    """Metadata 过滤不能绕过边界读取整库摘要，未配置能力也不能偷偷用原文替代。"""
+    service, engine, llm, kb, doc = _service(service_settings, llm_responses=[])
+    port = _community_port(service, kb, doc)
+    filtered = AnswerInput(
+        (kb.id,), "What is Atlas?", metadata_filter={"department": "private"},
+        evidence_mode="community",
+    )
+    result = await service.answer(_security(), filtered)
+    assert result.outcome == AnswerOutcome.NO_EVIDENCE
+    assert "aggregate_metadata_filter_unsupported" in result.warnings
+    assert port.validations == 0 and llm.requests == [] and engine.queries == []
+    service._graph_enabled = False
+    result = await service.answer(_security(), replace(filtered, metadata_filter=None))
+    assert "aggregate_unavailable" in result.warnings and llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_community_context_budget_preserves_sources_and_limits_original_context(
+    service_settings: ServiceSettings,
+) -> None:
+    """报告超预算不调用模型；报告可用时 C 原文只占剩余预算，不截断 A 来源。"""
+    service, engine, llm, kb, doc = _service(
+        service_settings, llm_responses=["Atlas links both sources. [A1]"]
+    )
+    port = _community_port(service, kb, doc)
+    profile = service._profiles.get("RETRIEVAL", "hybrid-structure-aware@6")
+    max_chars = profile["postprocess"]["max_context_tokens"] * 4
+    long_quote = "Synthetic raw source " + "x" * 16000
+    original_sources = port.evidence.sources
+    port.evidence = replace(
+        port.evidence,
+        sources=tuple(
+            replace(
+                source, quote=long_quote,
+                quote_sha256=hashlib.sha256(long_quote.encode()).hexdigest(),
+            )
+            for source in original_sources
+        ),
+    )
+    value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    over_budget = await service.answer(_security(), value)
+    assert over_budget.outcome == AnswerOutcome.NO_EVIDENCE
+    assert "aggregate_context_budget_exhausted" in over_budget.warnings
+    assert not llm.requests
+    budget_quote = "x" * (max_chars // 2)
+    budget_sources = (
+        replace(
+            original_sources[0], quote=budget_quote,
+            quote_sha256=hashlib.sha256(budget_quote.encode()).hexdigest(),
+        ),
+        original_sources[1],
+    )
+    port.evidence = replace(port.evidence, sources=budget_sources)
+    engine.vector = (
+        replace(
+            engine.vector[0], content=budget_quote,
+            engine_chunk_id=budget_sources[0].engine_chunk_id,
+        ),
+    )
+    engine.term = engine.vector
+    result = await service.answer(_security(), replace(value, request_id=uuid4()))
+    assert result.outcome == AnswerOutcome.SUCCESS and not result.citations
+    assert result.aggregate_evidence[0].sources == budget_sources
+    user_prompt = llm.requests[0].messages[-1].content
+    context = user_prompt.split("<context>", 1)[1].split("</context>", 1)[0]
+    assert len(context) <= max_chars
+    assert all(source.quote in context for source in budget_sources)
+
+
+@pytest.mark.asyncio
+async def test_community_success_sse_persists_aggregate_before_completed_and_redacts_stale_read(
+    service_settings: ServiceSettings,
+) -> None:
+    """收到终态就关闭仍有完整审计；以后来源失效时公共审计不再重放旧正文。"""
+    queries = SnapshotQueries()
+    service, _, _, kb, doc = _service(
+        service_settings, llm_responses=["Atlas links two sources. [A1]"], queries=queries
+    )
+    port = _community_port(service, kb, doc)
+    value = AnswerInput((kb.id,), "What is Atlas?", evidence_mode="community")
+    stream = service.stream_answer(_security(), value)
+    events = []
+    async for event in stream:
+        events.append(event)
+        if event.event == "completed":
+            break
+    await stream.aclose()
+    assert [item.event for item in events].count("aggregate") == 1
+    record = queries.records[value.request_id]
+    assert record.request_status == QueryStatus.COMPLETED and len(record.aggregate_evidence) == 1
+    assert record.answer_text == "Atlas links two sources. [A1]"
+    port.valid = False
+    public = await service.get_request(_security(), value.request_id)
+    assert public.answer_text is None and not public.aggregate_evidence
+    assert record.answer_text and record.aggregate_evidence
+    with pytest.raises(ResourceNotFoundError):
+        await service.get_request(_security("another-tenant"), value.request_id)

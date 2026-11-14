@@ -367,14 +367,14 @@ class ProfileSection(StrictModel):
 
 
 class SemanticCacheSection(StrictModel):
-    """Redis Search 向量索引契约；v3 新增过滤摘要和图谱模式/版本隔离字段。
+    """Redis Search 向量索引契约；v4 新增独立聚合证据模式和策略隔离字段。
 
-    新名字与前缀让历史缓存自然过期，不会 ALTER 或覆盖 v1/v2 的索引内容；模型或
+    新名字与前缀让历史缓存自然过期，不会 ALTER 或覆盖 v1/v2/v3 的索引内容；模型或
     维度另有变化时仍必须继续升版，不能仅因使用同一 Schema 就复用旧模型的数据。
     """
-    key_prefix: str = "rag-cache:semantic:v3:"
-    index_name: str = "rag_semantic_cache_v3"
-    index_schema_version: PositiveInt = 3
+    key_prefix: str = "rag-cache:semantic:v4:"
+    index_name: str = "rag_semantic_cache_v4"
+    index_schema_version: PositiveInt = 4
     vector_field: str = "embedding"
     vector_data_type: Literal["FLOAT32"] = "FLOAT32"
     embedding_model: str

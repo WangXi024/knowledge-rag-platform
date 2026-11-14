@@ -78,6 +78,7 @@ def migrated_database_dsn() -> str:
             "V1.0.0__init_schema.sql",
             "V1.0.0__to__V1.1.0__shared_knowledge_bases.sql",
             "V1.1.0__to__V1.2.0__native_graphrag.sql",
+            "V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql",
         ):
             statement = migration_sql("rag_app", filename).replace(
                 "current_database() <> 'rag_app'", "current_database() <> 'rag_app_test'"

@@ -24,12 +24,19 @@ from uuid import UUID, uuid4
 
 import anyio
 
+from rag_service.application import aggregate
 from rag_service.application.access import (
     KnowledgeBaseAccessPolicy,
     SharedKnowledgeBaseAccessPolicy,
 )
 from rag_service.application.idempotency import IdempotencyService
 from rag_service.application.profiles import ProfileCatalog
+from rag_service.domain.aggregate import (
+    AGGREGATE_PROFILE_REF,
+    AggregateCommunityPort,
+    AggregateEvidence,
+    EvidenceMode,
+)
 from rag_service.domain.cache import cache_id, knowledge_base_revisions_hash, metadata_filter_hash
 from rag_service.domain.errors import LlmError, RagError, ResourceNotFoundError
 from rag_service.domain.graph import (
@@ -78,6 +85,7 @@ from rag_service.security.context import SecurityContext
 from rag_service.settings import AnswersSection, AppSection, LlmSection
 
 _CITATION_LABEL = re.compile(r"\[C([1-9][0-9]*)\]")
+_AGGREGATE_LABEL = re.compile(r"\[A[^\]\r\n]*\]")
 _CJK_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _ANSWER_PROMPT_PROFILE = "rag-answer-localized@1"
 _CITATION_REPAIR_PROMPT_PROFILE = "citation-repair-localized@1"
@@ -261,6 +269,7 @@ class AnswerInput:
     generation_profile: str = "answer-openai-compatible@4"
     response_language: str = "zh-CN"
     request_id: UUID = field(default_factory=uuid4)
+    evidence_mode: EvidenceMode = "original"
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +298,8 @@ class AnswerOutput:
     retrieval_top_k: int | None = None
     rerank_top_n: int | None = None
     context_top_n: int | None = None
+    evidence_mode: EvidenceMode = "original"
+    aggregate_evidence: tuple[AggregateEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +363,7 @@ class OnlineService:
         graphs: GraphRepository | None = None,
         native_graph: GraphPort | None = None,
         graph_enabled: bool = False,
+        aggregate_port: AggregateCommunityPort | None = None,
     ) -> None:
         """注入资源仓库、模型端口、Profile、缓存和审计仓库。
 
@@ -380,6 +392,7 @@ class OnlineService:
         self._graphs = graphs
         self._native_graph = native_graph
         self._graph_enabled = graph_enabled
+        self._aggregate_port = aggregate_port
 
     async def execute_idempotent(
         self,
@@ -666,6 +679,7 @@ class OnlineService:
         成功后保存脱敏查询、答案、用量、耗时和实际使用的引用。
         """
         _response_language_name(value.response_language)
+        _validate_evidence_mode(value.evidence_mode)
         if self._queries is None:
             return await self._answer_with_deadline(security, value)
         normalized = normalize_query(value.query, self._app_settings.max_query_chars)
@@ -676,7 +690,15 @@ class OnlineService:
             query_redacted=_redact_query(normalized),
             knowledge_base_ids=value.knowledge_base_ids,
             retrieval_profile_ref=value.retrieval_profile,
-            prompt_profile_ref=_ANSWER_PROMPT_PROFILE,
+            prompt_profile_ref=(
+                AGGREGATE_PROFILE_REF
+                if value.evidence_mode == "community"
+                else _ANSWER_PROMPT_PROFILE
+            ),
+            evidence_mode=value.evidence_mode,
+            aggregate_profile_ref=(
+                AGGREGATE_PROFILE_REF if value.evidence_mode == "community" else None
+            ),
             model_profile_ref=value.generation_profile,
             request_status=QueryStatus.ACCEPTED,
         )
@@ -700,6 +722,7 @@ class OnlineService:
         record.request_status = QueryStatus.COMPLETED
         record.outcome = result.outcome
         record.answer_text = result.answer
+        record.aggregate_evidence = result.aggregate_evidence
         record.effective_query_redacted = _redact_query(result.effective_query or normalized)
         record.warnings = result.warnings
         record.timings = result.timings
@@ -764,14 +787,46 @@ class OnlineService:
         graph_plan = await self._native_graph_plan(
             knowledge_bases, metadata_filter=value.metadata_filter
         )
+        aggregate_plan = aggregate.AggregatePlan()
+        context_characters = 0
+        if value.evidence_mode == "community":
+            aggregate_plan = await aggregate.prepare(
+                self._aggregate_port if self._graph_enabled else None,
+                security,
+                knowledge_bases,
+                filtered=value.metadata_filter is not None,
+            )
+            postprocess = _mapping(
+                self._profiles.get("RETRIEVAL", value.retrieval_profile), "postprocess"
+            )
+            context_characters = 4 * _integer(postprocess, "max_context_tokens")
+            aggregate_plan = aggregate.within_budget(aggregate_plan, context_characters)
+            if not aggregate_plan.evidences:
+                return finished(
+                    AnswerOutput(
+                        answer=_no_evidence_answer(value.response_language),
+                        outcome=AnswerOutcome.NO_EVIDENCE,
+                        citations=(),
+                        warnings=aggregate_plan.warnings,
+                        usage=None,
+                        response_language=value.response_language,
+                        original_query=normalized_question,
+                        effective_query=normalized_question,
+                        evidence_mode=value.evidence_mode,
+                    )
+                )
         boundary = self._cache_boundary(
             security,
             knowledge_bases,
             value,
-            graph_version_hash=graph_plan.version_hash,
+            graph_version_hash=(
+                aggregate_plan.version_hash
+                if value.evidence_mode == "community"
+                else graph_plan.version_hash
+            ),
             graph_mode=graph_plan.mode,
         )
-        cache_warnings: tuple[str, ...] = ()
+        cache_warnings: tuple[str, ...] = aggregate_plan.warnings
         if self._cache is not None and graph_plan.cacheable:
             # 精确缓存成本最低，先查；未命中再做向量语义缓存。任何缓存故障都降级为
             # 正常检索，不应让“加速组件”变成问答可用性的单点故障。
@@ -816,7 +871,7 @@ class OnlineService:
                             )
                         return finished(result)
             except Exception:
-                cache_warnings = ("cache_read_bypassed",)
+                cache_warnings = (*cache_warnings, "cache_read_bypassed")
             timings["cache_lookup_ms"] = _elapsed_ms(cache_started_at)
 
         retrieval_started_at = time.perf_counter()
@@ -833,7 +888,7 @@ class OnlineService:
             native_graph_plan=graph_plan,
         )
         timings["retrieval_ms"] = _elapsed_ms(retrieval_started_at)
-        if not retrieval.candidates:
+        if not retrieval.candidates and not aggregate_plan.evidences:
             # 没有证据时不调用 LLM，返回固定措辞，避免模型凭常识编造答案。
             return finished(
                 AnswerOutput(
@@ -860,8 +915,19 @@ class OnlineService:
             value.retrieval_profile,
             retrieval.query_type,
         )
+        if aggregate_plan.evidences:
+            context = aggregate.bind_original_context(context, aggregate_plan.evidences)
+            # C 原文只使用 A 报告及全部来源之后的剩余输入预算，不改变输出 Token 参数。
+            while context and len(
+                aggregate.prompt_context(
+                    self._context_text(context, merge_adjacent=False), aggregate_plan.evidences
+                )
+            ) > context_characters:
+                context = context[:-1]
         citations = self._citations(context)
-        request = self._answer_request(value, retrieval.original_query, context)
+        request = self._answer_request(
+            value, retrieval.original_query, context, aggregate_plan.evidences
+        )
         generation_started_at = time.perf_counter()
         response = await self._llm.complete(request)
         timings["generation_ms"] = _elapsed_ms(generation_started_at)
@@ -871,9 +937,13 @@ class OnlineService:
             request,
             citations,
             value.response_language,
+            aggregate_plan.evidences,
         )
         timings["citation_validation_ms"] = _elapsed_ms(citation_started_at)
-        if not valid:
+        sources_valid = value.evidence_mode != "community" or await aggregate.revalidate(
+            self._aggregate_port, security, aggregate_plan.evidences
+        )
+        if not valid or not sources_valid:
             return finished(
                 AnswerOutput(
                     answer=_no_evidence_answer(value.response_language),
@@ -882,7 +952,11 @@ class OnlineService:
                     warnings=(
                         *retrieval.warnings,
                         *cache_warnings,
-                        "citation_validation_failed",
+                        (
+                            "citation_validation_failed"
+                            if not valid
+                            else "aggregate_sources_changed"
+                        ),
                     ),
                     usage=response.usage,
                     response_language=value.response_language,
@@ -896,6 +970,7 @@ class OnlineService:
                     retrieval_top_k=retrieval.retrieval_top_k,
                     rerank_top_n=retrieval.rerank_top_n,
                     context_top_n=retrieval.context_top_n,
+                    evidence_mode=value.evidence_mode,
                 )
             )
         used = self._used_citations(answer, citations)
@@ -916,6 +991,8 @@ class OnlineService:
             retrieval_top_k=retrieval.retrieval_top_k,
             rerank_top_n=retrieval.rerank_top_n,
             context_top_n=retrieval.context_top_n,
+            evidence_mode=value.evidence_mode,
+            aggregate_evidence=aggregate.used(answer, aggregate_plan.evidences),
         )
         if self._cache is not None and retrieval.graph_cacheable:
             cache_write_started_at = time.perf_counter()
@@ -927,6 +1004,7 @@ class OnlineService:
                         normalized_question=normalized_question,
                         answer=result.answer,
                         citations=result.citations,
+                        aggregate_evidence=result.aggregate_evidence,
                         original_query=result.original_query,
                         effective_query=result.effective_query,
                         query_language=result.query_language,
@@ -960,6 +1038,7 @@ class OnlineService:
         CancelledError。两条路径均屏蔽外层持续取消、有界提交审计，再关闭内部生成器。
         """
         _response_language_name(value.response_language)
+        _validate_evidence_mode(value.evidence_mode)
         stream = self._stream_with_deadline(security, value)
         if self._queries is None:
             try:
@@ -976,7 +1055,15 @@ class OnlineService:
             query_redacted=_redact_query(normalized),
             knowledge_base_ids=value.knowledge_base_ids,
             retrieval_profile_ref=value.retrieval_profile,
-            prompt_profile_ref=_ANSWER_PROMPT_PROFILE,
+            prompt_profile_ref=(
+                AGGREGATE_PROFILE_REF
+                if value.evidence_mode == "community"
+                else _ANSWER_PROMPT_PROFILE
+            ),
+            evidence_mode=value.evidence_mode,
+            aggregate_profile_ref=(
+                AGGREGATE_PROFILE_REF if value.evidence_mode == "community" else None
+            ),
             model_profile_ref=value.generation_profile,
             request_status=QueryStatus.ACCEPTED,
         )
@@ -1032,6 +1119,10 @@ class OnlineService:
                     citation = event.data.get("citation")
                     if isinstance(citation, Citation):
                         citations.append(citation)
+                elif event.event == "aggregate":
+                    evidence = event.data.get("evidence")
+                    if isinstance(evidence, AggregateEvidence):
+                        record.aggregate_evidence = (*record.aggregate_evidence, evidence)
                 elif event.event == "retrieval.completed":
                     record.candidate_count = int(event.data.get("candidate_count", 0))
                     record.context_count = int(event.data.get("context_count", 0))
@@ -1132,6 +1223,15 @@ class OnlineService:
         模型 Token 到达时立即发 ``delta``；完整文本结束后才校验引用并发 ``citation``。
         最终 ``completed`` 才代表答案和引用均已确认；关闭本生成器会同步关闭模型流。
         """
+        if value.evidence_mode == "community":
+            # 派生证据先完成生成和二次来源核验，之后才发布正文；原文模式保留逐 Token 流。
+            stream = self._stream_community_answer(security, value)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await _close_answer_stream(stream)
+            return
         started_at = time.perf_counter()
         timings: dict[str, float] = {}
         yield StreamEvent("accepted")
@@ -1366,6 +1466,55 @@ class OnlineService:
             },
         )
 
+    async def _stream_community_answer(
+        self, security: SecurityContext, value: AnswerInput
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """社区模式不发布待核验草稿，只在来源复核完成后发送答案与独立 A 证据。"""
+        yield StreamEvent("accepted", {"evidence_mode": "community"})
+        yield StreamEvent("retrieval.started", {"retrieval_profile": value.retrieval_profile})
+        yield StreamEvent(
+            "generation.started",
+            {
+                "model_profile": value.generation_profile,
+                "response_language": value.response_language,
+                "evidence_mode": "community",
+                "buffered_until_verified": True,
+            },
+        )
+        result = await self._answer_impl(security, value)
+        yield StreamEvent(
+            "retrieval.completed",
+            {
+                "candidate_count": len(result.citations),
+                "context_count": len(result.citations),
+                "original_query": result.original_query,
+                "effective_query": result.effective_query,
+                "query_rewritten": _query_was_rewritten(result),
+                "query_plan": _query_plan_trace(result),
+            },
+        )
+        # 即使读取耗时缓存，也只发送经过当前请求复核的报告和答案。
+        yield StreamEvent("answer.delta", {"delta": result.answer})
+        for citation in result.citations:
+            yield StreamEvent("citation", {"citation": citation})
+        for evidence in result.aggregate_evidence:
+            yield StreamEvent("aggregate", {"evidence": evidence})
+        if result.usage is not None:
+            yield StreamEvent("usage", {"usage": result.usage})
+        yield StreamEvent(
+            "completed",
+            {
+                "outcome": result.outcome.value,
+                "warnings": list(result.warnings),
+                "cache_type": result.cache_type,
+                "timings": result.timings,
+                "evidence_mode": "community",
+                "aggregate_evidence": [
+                    aggregate.public_payload(item) for item in result.aggregate_evidence
+                ],
+            },
+        )
+
     async def get_request(
         self,
         security: SecurityContext,
@@ -1377,6 +1526,31 @@ class OnlineService:
         value = await self._queries.get(security.security_scope_id, request_id)
         if value is None:
             raise ResourceNotFoundError("RAG-QUERY-004", "问答请求不存在")
+        if value.evidence_mode == "community" and (
+            value.aggregate_evidence or value.outcome == AnswerOutcome.SUCCESS
+        ):
+            citations = await self._queries.list_citations(security.security_scope_id, request_id)
+            valid = (
+                aggregate.labels_valid(value.answer_text or "", citations, value.aggregate_evidence)
+                and aggregate.citations_in_sources(citations, value.aggregate_evidence)
+                and await aggregate.revalidate(
+                    self._aggregate_port, security, value.aggregate_evidence
+                )
+            )
+            if valid:
+                return value
+            # 历史审计仍保留完整原始快照；公共读取不能在文档撤销后重放失效摘要正文。
+            return replace(
+                value,
+                aggregate_evidence=(),
+                answer_text=None,
+                outcome=(
+                    AnswerOutcome.REFUSED
+                    if value.outcome == AnswerOutcome.SUCCESS
+                    else value.outcome
+                ),
+                warnings=(*value.warnings, "aggregate_sources_changed"),
+            )
         return value
 
     async def cancel_request(
@@ -1767,13 +1941,21 @@ class OnlineService:
                 [(item.id, item.revision) for item in knowledge_bases]
             ),
             retrieval_profile=value.retrieval_profile,
-            prompt_profile=_ANSWER_PROMPT_PROFILE,
+            prompt_profile=(
+                AGGREGATE_PROFILE_REF
+                if value.evidence_mode == "community"
+                else _ANSWER_PROMPT_PROFILE
+            ),
             model_profile=value.generation_profile,
             language=value.response_language,
             history_hash=hashlib.sha256(history.encode("utf-8")).hexdigest(),
             filter_hash=metadata_filter_hash(value.metadata_filter),
             graph_version_hash=graph_version_hash,
             graph_mode=graph_mode,
+            evidence_mode=value.evidence_mode,
+            aggregate_profile_ref=(
+                AGGREGATE_PROFILE_REF if value.evidence_mode == "community" else "none"
+            ),
         )
 
     async def _cache_entry_valid(
@@ -1784,7 +1966,32 @@ class OnlineService:
         value: CacheEntry,
     ) -> bool:
         """在返回缓存前重新验证边界和每条引用仍指向 READY 文档。"""
-        if value.boundary != expected_boundary or not value.citations:
+        if value.boundary != expected_boundary:
+            return False
+        if expected_boundary.evidence_mode == "community":
+            allowed = {item.id: item.security_scope_id for item in knowledge_bases}
+            if (
+                not value.aggregate_evidence
+                or any(
+                    allowed.get(item.knowledge_base_id) != item.resource_scope_id
+                    for item in value.aggregate_evidence
+                )
+                or not aggregate.labels_valid(
+                    value.answer, value.citations, value.aggregate_evidence
+                )
+                or not aggregate.citations_in_sources(
+                    value.citations, aggregate.used(value.answer, value.aggregate_evidence)
+                )
+                or not await aggregate.revalidate(
+                    self._aggregate_port, security, value.aggregate_evidence
+                )
+            ):
+                return False
+        elif (
+            not value.citations
+            or value.aggregate_evidence
+            or not self._all_labels_valid(value.answer, value.citations)
+        ):
             return False
         engine_health = await self._rag_engine.health()
         if engine_health.status != "ok" or any(
@@ -1846,6 +2053,10 @@ class OnlineService:
             retrieval_top_k=value.retrieval_top_k,
             rerank_top_n=value.rerank_top_n,
             context_top_n=value.context_top_n,
+            evidence_mode=value.boundary.evidence_mode,
+            aggregate_evidence=tuple(
+                replace(item, aggregate_id=uuid4()) for item in value.aggregate_evidence
+            ),
         )
 
     async def _rewrite_query(
@@ -2599,9 +2810,12 @@ class OnlineService:
         value: AnswerInput,
         query: str,
         context: tuple[RetrievalCandidate, ...],
+        evidences: tuple[AggregateEvidence, ...] = (),
     ) -> LlmRequest:
         """把编号证据、历史和问题填入版本化 Prompt，构造可复现 LLM 请求。"""
-        prompt_profile = self._profiles.get("PROMPT", _ANSWER_PROMPT_PROFILE)
+        prompt_profile = self._profiles.get(
+            "PROMPT", AGGREGATE_PROFILE_REF if evidences else _ANSWER_PROMPT_PROFILE
+        )
         model_profile = self._profiles.get("MODEL", value.generation_profile)
         response_language = _response_language_name(value.response_language)
         postprocess = _mapping(
@@ -2612,6 +2826,8 @@ class OnlineService:
             context,
             merge_adjacent=bool(postprocess.get("merge_adjacent_chunks", False)),
         )
+        if evidences:
+            context_text = aggregate.prompt_context(context_text, evidences)
         conversation = "\n".join(f"{item.role}: {item.content}" for item in value.messages)
         user_prompt = _template(
             _string(prompt_profile, "template"),
@@ -2723,8 +2939,13 @@ class OnlineService:
         original_request: LlmRequest,
         citations: tuple[Citation, ...],
         response_language: str,
+        evidences: tuple[AggregateEvidence, ...] = (),
     ) -> tuple[str, bool]:
         """检查答案引用标签；缺失/越界时最多调用一次确定性修复 Prompt。"""
+        if evidences:
+            return await self._validate_aggregate_or_repair(
+                answer, original_request, citations, evidences, response_language
+            )
         if self._all_labels_valid(answer, citations) and _CITATION_LABEL.search(answer):
             return answer, True
         if (
@@ -2758,6 +2979,50 @@ class OnlineService:
         )
         return repaired.content, valid
 
+    async def _validate_aggregate_or_repair(
+        self,
+        answer: str,
+        original_request: LlmRequest,
+        citations: tuple[Citation, ...],
+        evidences: tuple[AggregateEvidence, ...],
+        response_language: str,
+    ) -> tuple[str, bool]:
+        """派生回答允许 C/A 两套标签，修复仍保留原请求模型参数和完整证据上下文。"""
+        if aggregate.labels_valid(answer, citations, evidences):
+            return answer, True
+        if (
+            not self._answer_settings.retry_generation_when_missing_citations
+            or self._answer_settings.max_citation_repair_attempts < 1
+        ):
+            return answer, False
+        profile = self._profiles.get("PROMPT", "citation-repair-community-localized@1")
+        labels = ", ".join(
+            [item.label for item in citations] + [item.label for item in evidences]
+        )
+        repaired = await self._llm.complete(
+            replace(
+                original_request,
+                messages=(
+                    LlmMessage(
+                        "system",
+                        f"{original_request.messages[0].content}\n{_string(profile, 'system')}",
+                    ),
+                    original_request.messages[-1],
+                    LlmMessage("assistant", answer),
+                    LlmMessage(
+                        "user",
+                        _template(
+                            _string(profile, "template"),
+                            allowed_citation_labels=labels,
+                            response_language=_response_language_name(response_language),
+                            answer=answer,
+                        ),
+                    ),
+                ),
+            )
+        )
+        return repaired.content, aggregate.labels_valid(repaired.content, citations, evidences)
+
     @staticmethod
     def _all_labels_valid(
         answer: str,
@@ -2765,7 +3030,9 @@ class OnlineService:
     ) -> bool:
         """确认答案出现的每个 ``[Cn]`` 都存在于允许引用集合。"""
         available = {item.label for item in citations}
-        return all(f"C{match}" in available for match in _CITATION_LABEL.findall(answer))
+        return not _AGGREGATE_LABEL.search(answer) and all(
+            f"C{match}" in available for match in _CITATION_LABEL.findall(answer)
+        )
 
     @staticmethod
     def _used_citations(
@@ -2780,6 +3047,12 @@ class OnlineService:
 def _query_language(query: str) -> str:
     """以是否包含中日韩统一表意文字快速区分中文或英文查询。"""
     return _LANGUAGE_ZH if _CJK_CHARACTER.search(query) else _LANGUAGE_EN
+
+
+def _validate_evidence_mode(value: str) -> None:
+    """应用层调用方同样遵守白名单，不只依赖 HTTP Pydantic 校验。"""
+    if value not in {"original", "community"}:
+        raise RagError("RAG-QUERY-001", "不支持的证据模式", http_status=400, retryable=False)
 
 
 def _query_plan_trace(value: RetrievalOutput | AnswerOutput) -> dict[str, Any]:
@@ -3315,6 +3588,8 @@ def stream_event_json(
     for key, value in event.data.items():
         if isinstance(value, Citation):
             data[key] = _citation_json(value)
+        elif isinstance(value, AggregateEvidence):
+            data[key] = aggregate.public_payload(value)
         elif isinstance(value, LlmUsage):
             data.update(
                 {

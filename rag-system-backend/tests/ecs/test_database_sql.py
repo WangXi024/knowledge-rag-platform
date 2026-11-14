@@ -134,6 +134,20 @@ def test_canonical_sql_install_guards_comments_and_access(monkeypatch: pytest.Mo
                         with pytest.raises(psycopg.Error, match="V1.1.0 baseline"):
                             connection.execute(graph_upgrade)
                         connection.execute("ROLLBACK")
+                        # 二期只追加JSON证据字段：带业务行升级仍原样保留，重复执行必须拒绝。
+                        evidence_upgrade = (ROOT / "migrations/rag_app/"
+                            "V1.2.0__to__V1.3.0__graph_aggregate_evidence.sql").read_text(encoding="utf-8")
+                        connection.execute(evidence_upgrade)
+                        assert connection.execute(
+                            "SELECT name,revision FROM rag_app.knowledge_base "
+                            "WHERE id='00000000-0000-0000-0000-000000000012'"
+                        ).fetchone() == ("preserved-v11-fixture", 0)
+                        assert connection.execute(
+                            "SELECT release_version FROM rag_app.alembic_version"
+                        ).fetchone() == ("V1.3.0",)
+                        with pytest.raises(psycopg.Error, match="V1.2.0 baseline"):
+                            connection.execute(evidence_upgrade)
+                        connection.execute("ROLLBACK")
                     connection.execute((SUPPORT / f"03_{name}_comments.sql").read_text())
                     verification = (SUPPORT / f"04_verify_{name}.sql").read_text()
                     expected = re.findall(
